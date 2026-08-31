@@ -17,7 +17,10 @@ query them, and the four traps that make a naive implementation quietly wrong.
 | [ALGORITHM.md](ALGORITHM.md) | Reference — every stage, input/output/algorithm |
 
 Work through this with a terminal open. Every command below is real, and every
-output shown is actual output from this project.
+output shown is actual output from this project. If you would rather watch the
+whole tutorial run start to finish before reading it, skip to
+[section 11](#11-running-every-lab-at-once) — `tools/test_tutorial.sh` executes
+every lab in order.
 
 ---
 
@@ -614,6 +617,45 @@ A checklist, roughly in order of how often each one bites:
       the extracted tree, and with `--with-tests` runs `ctest`. A closure that
       compiles proves the headers resolved; a closure that *passes its tests*
       proves the code still works. Make the stronger check the one your CI runs.
+
+---
+
+## 11. Running every lab at once
+
+Everything in this tutorial is executable, and
+[`tools/test_tutorial.sh`](tools/test_tutorial.sh) runs all of it end to end.
+It is the tutorial as a script: the same commands, in the same order, against
+this repo. Use it two ways — as a smoke test that the pipeline still works on
+your machine, and as a way to see every lab's real output scroll past before you
+read the prose behind it.
+
+```sh
+bash tools/test_tutorial.sh
+```
+
+It runs from any directory (it `cd`s to the repo root itself) and reproduces, in
+order:
+
+| Section printed | What it does |
+|---|---|
+| `§2  cmake --graphviz` | Emits `build/deps.dot` — the lossy approach from §2 |
+| `Lab 1  …` | File API query, index reader, the `greeter` target, the directory graph (§4) |
+| `Lab 2  …` | Rebuilds with `-MMD`, prints the `greeter` depfile and its plain-`-I` include flags (§5) |
+| `Lab 3  …` | The `FetchContent_Declare` block and the `ctest --show-only=json-v1` reply (§6) |
+| `§7  extract …` | Extracts `greeter` and `tally` with `--verify`, printing each generated `CMakeLists.txt` |
+| `§9 Q2  …` | Confirms `tally --with-tests` still emits no `FetchContent` |
+
+It is strict by design: `set -euo pipefail` means it **exits non-zero on the
+first command that fails**, and two labs assert their invariant explicitly (no
+`_deps/` in `tally`'s build tree, no `FetchContent` in its `CMakeLists.txt`) and
+abort if it does not hold. A clean run ends with `ALL LABS PASSED`, so the
+script doubles as CI: if any source of truth stops telling the truth — the File
+API layout shifts, a depfile goes missing, an extraction regresses — it fails
+loudly instead of drifting out of sync with this document.
+
+Everything it writes lands in the two gitignored directories from §1, `build/`
+and `extracted/`, so re-running it never dirties the tree and you can delete both
+freely afterward.
 
 ---
 
