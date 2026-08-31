@@ -71,6 +71,37 @@ How it works — it combines three sources of truth:
 Because the apps touch different library subsets, the extracted trees differ:
 `roller` contains no `input`, `greeter` contains no `rng`.
 
+### Carrying the tests over (`--with-tests`)
+
+By default the extracted tree holds application code only — test targets are not
+reachable by walking link edges outward from an app (`input_test` depends on
+`input`, not the reverse). `--with-tests` adds them:
+
+```sh
+python3 tools/extract_closure.py guess --with-tests --verify   # --verify also runs ctest
+```
+
+`ctest --show-only=json-v1` is the authority for what counts as a test, and each
+test's command is matched against the targets' build artifacts, so nothing is
+inferred from `*_test`-style naming. A test is carried over only when every
+first-party target it links is already in the app's closure — so tests never
+enlarge the tree — and one that is not is reported:
+
+```
+note: skipping test 'rng_test' -- it needs rng, not in greeter's closure
+```
+
+| target  | tests carried over     |
+|---------|------------------------|
+| guess   | `input_test`, `rng_test` |
+| roller  | `rng_test`             |
+| greeter | `input_test`           |
+
+Since the libraries are flattened away, each test compiles the library sources
+it used to link; the emitted `CMakeLists.txt` gains `enable_testing()`, one
+`add_executable()` per test, and an `add_test()` preserving the registered name.
+This upgrades `--verify` from "compiles standalone" to "passes standalone".
+
 You can also emit the raw target graph directly for inspection:
 
 ```sh
