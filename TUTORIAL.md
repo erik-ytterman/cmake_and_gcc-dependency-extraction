@@ -44,7 +44,7 @@ Terms used throughout. Skim now, refer back as needed.
 
 ## 1. The problem
 
-You have a monorepo. Three apps share a pool of libraries, each touching a
+You have a monorepo. Four apps share a pool of libraries, each touching a
 different subset, plus some generated code and a third-party dependency:
 
 ```
@@ -58,6 +58,29 @@ You want `greeter` alone in a small standalone tree: its sources, the library
 sources it actually links, the headers it actually includes, and nothing else.
 
 The hard part is *nothing else*. Anyone can copy the whole repo.
+
+### The repo at a glance
+
+Three different things live side by side here, and it helps to keep them
+straight before you start — especially `build/`, which is an *input* to the
+extractor, not one of its products.
+
+| Directory | Purpose |
+|---|---|
+| **The sample project** — what you extract *from* | |
+| `CMakeLists.txt` | Top level. Declares `fmt` via FetchContent, generates `build_info.hpp`, adds the subdirectories below. |
+| `apps/` | The four applications, one directory each. Deliberately shaped so their dependency subsets differ — that is what makes minimal extraction observable. |
+| `libs/` | The shared first-party libraries (`rng`, `input`). Each has `include/`, `src/`, and a `test/` registered with CTest. |
+| `cmake/` | CMake inputs that are not targets — here `build_info.hpp.in`, the template `configure_file()` turns into a generated header. This is the project's stand-in for "generated code". |
+| **The tool** — what this tutorial teaches | |
+| `tools/` | `extract_closure.py`, the extractor. Pure Python, no part of the C++ build. |
+| **Generated output** — both are gitignored, delete freely | |
+| `build/` | The configured build tree of the *parent* project, and the extractor's entire input: File API replies under `.cmake/api/`, `.d` depfiles beside each object file in `<target>/CMakeFiles/<target>.dir/`, generated headers in `generated/`, and fetched third-party sources in `_deps/`. |
+| `extracted/` | The extractor's output — one self-contained tree per app, each with its *own* nested `build/` when you pass `--verify`. |
+
+So `build/` is where the facts come from, and `extracted/` is where the answers
+go. If a path in this tutorial confuses you, check which of those two it is
+under.
 
 ---
 
