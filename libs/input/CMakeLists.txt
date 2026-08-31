@@ -1,0 +1,10 @@
+add_library(input src/input.cpp)
+target_include_directories(input PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(input PUBLIC fmt::fmt)
+target_compile_features(input PUBLIC cxx_std_17)
+
+if(BUILD_TESTING)
+  add_executable(input_test test/input_test.cpp)
+  target_link_libraries(input_test PRIVATE input)
+  add_test(NAME input_test COMMAND input_test)
+endif()
