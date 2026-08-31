@@ -1,8 +1,14 @@
 # cmake + gcc dependency-extraction POC
 
 A small CMake/CTest project shaped to explore **minimal per-application code
-closure extraction**. Three applications draw from a shared pool of libraries,
+closure extraction**. Four applications draw from a shared pool of libraries,
 each touching a *different subset*, plus generated code.
+
+| Doc | Role |
+|---|---|
+| **README.md** (you are here) | Quickstart — run the thing |
+| [TUTORIAL.md](TUTORIAL.md) | Learn the concepts and APIs, hands-on, with the traps |
+| [ALGORITHM.md](ALGORITHM.md) | Reference — every stage, input/output/algorithm |
 
 ## Structure
 

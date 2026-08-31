@@ -1,5 +1,9 @@
 # Extraction algorithm
 
+> Reference documentation. If you are meeting this pipeline for the first time,
+> read [TUTORIAL.md](TUTORIAL.md) instead — it teaches the underlying APIs
+> hands-on and covers the traps. Come back here for stage-by-stage detail.
+
 This document describes `tools/extract_closure.py` stage by stage: for each step,
 its **purpose**, its **input**, its **output**, and the **actual algorithm** it
 runs. The goal of the whole pipeline is: given one application target `T`,
