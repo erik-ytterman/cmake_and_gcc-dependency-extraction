@@ -1,4 +1,4 @@
-# cmake + gcc dependency-extraction POC
+# cmake + gcc dependency-extraction POC (proof of concept)
 
 A small CMake/CTest project shaped to explore **minimal per-application code
 closure extraction**. Four applications draw from a shared pool of libraries,
@@ -72,8 +72,9 @@ How it works — it combines three sources of truth:
 
 1. **CMake File API codemodel** — the authoritative target/link graph, walked
    transitively from the chosen target to find its first-party libraries.
-2. **Per-TU `.d` files** (`g++ -MMD`) — the precise set of headers actually
-   `#included`, so only headers on the real closure are copied.
+2. **Per-translation-unit `.d` files** (`g++ -MMD`) — for each `.cpp` and
+   everything it includes, the precise set of headers actually `#included`, so
+   only headers on the real closure are copied.
 3. **Top-level `CMakeLists.txt`** — the `FetchContent_Declare(fmt ...)` block is
    copied verbatim into the extracted `CMakeLists.txt`, so third-party deps stay
    as FetchContent (not vendored) and the tree remains standalone yet minimal.

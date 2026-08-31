@@ -21,6 +21,27 @@ output shown is actual output from this project.
 
 ---
 
+## Vocabulary
+
+Terms used throughout. Skim now, refer back as needed.
+
+| Term | Meaning |
+|---|---|
+| **Translation unit (TU)** | One source file *plus every header it includes*, as the compiler sees it after preprocessing. One `.cpp` → one TU → one object file → one depfile. It is the unit the compiler actually reasons about, which is why per-TU facts are so precise. |
+| **Closure** | Everything transitively reachable from a starting point. *Target closure*: every library an app links, directly or through another library. *Header closure*: every header a TU includes, directly or through another header. |
+| **Depfile** (`.d` file) | A small file in Makefile syntax that the compiler writes next to each object file, listing that TU's header closure. Produced by `-MMD`. |
+| **Codemodel** | The CMake File API object describing a configured build: its targets, their sources, include directories and link edges. |
+| **First-party / third-party** | Code the project owns versus code it pulls in from outside. The boundary is drawn from the project's own dependency declarations — never from a path pattern. |
+| **Ground truth** | A fact recorded by the tool that actually did the work (CMake, the compiler), as opposed to one re-derived by inspecting files afterwards. The whole design rests on preferring the former. |
+| **Generator expression** | CMake's `$<...>` syntax, evaluated when the build files are generated rather than when the `CMakeLists.txt` is read. One of several reasons that file cannot simply be parsed. |
+| **INTERFACE library** | A CMake target that compiles nothing and exists only to pass usage requirements — include directories, defines, flags — to whatever links it. `build_info` is one. See Trap 2. |
+| **Imported target** | A target standing in for something built outside this project, e.g. produced by `find_package()`. |
+| **Multi-config generator** | A generator whose single build tree holds several configurations at once (Ninja Multi-Config, Visual Studio), as opposed to one configuration per build dir. |
+| **In-source / out-of-source build** | Whether the build directory sits inside the source tree (`./build/`) or outside it. This project's default is in-source — see Trap 3. |
+| **POC** | Proof of concept. This repo is one: it demonstrates the approach rather than being production-hardened. |
+
+---
+
 ## 1. The problem
 
 You have a monorepo. Three apps share a pool of libraries, each touching a
@@ -79,7 +100,7 @@ the compiler already computed.** Ask them.
 | Source | Question it answers | Authority for |
 |---|---|---|
 | CMake File API codemodel | What targets exist, what links what, what compiles what | The **target graph** |
-| Compiler depfiles (`-MMD`) | Which headers did this TU *actually* include | The **header closure** |
+| Compiler depfiles (`-MMD`) | Which headers did this translation unit *actually* include | The **header closure** |
 | The project's own `FetchContent_Declare` | What is third-party, and pinned to what | The **dependency boundary** |
 
 Plus one more for tests: `ctest --show-only=json-v1` — the authority on what is
@@ -199,8 +220,8 @@ directory.** Hold that thought — it is Trap 1.
 ## 5. Lab 2 — Compiler depfiles
 
 The codemodel knows targets. It does *not* know which headers a translation unit
-actually included — only the compiler does, because only the compiler ran the
-preprocessor.
+(TU — one `.cpp` plus everything it includes) actually pulled in. Only the
+compiler knows that, because only the compiler ran the preprocessor.
 
 Ask for it with `-MMD`, which makes GCC/Clang write a `.d` file next to each
 object file:

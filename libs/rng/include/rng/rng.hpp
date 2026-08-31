@@ -5,8 +5,9 @@
 
 namespace rng {
 
-// Thin wrapper around a deterministic PRNG. Construct with an explicit seed for
-// reproducibility (used in tests), or via make_seeded() for real runs.
+// Thin wrapper around a deterministic PRNG (pseudo-random number generator).
+// Construct with an explicit seed for reproducibility (used in tests), or via
+// make_seeded() for real runs.
 class Generator {
  public:
   explicit Generator(std::uint64_t seed) : engine_(seed) {}

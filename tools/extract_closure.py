@@ -4,7 +4,8 @@ flat, standalone, buildable directory.
 
 Inputs (all derived from an already-configured build dir):
   * CMake File API codemodel  -> authoritative target/link graph
-  * per-TU .d files            -> precise header closure actually #included
+  * .d files, one per TU       -> precise header closure actually #included
+    (TU = translation unit: one .cpp plus every header it includes)
   * top-level CMakeLists.txt   -> FetchContent_Declare blocks for third-party deps
   * ctest --show-only          -> the registered tests (only with --with-tests)
 
