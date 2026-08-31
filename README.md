@@ -16,6 +16,7 @@ apps/
   guess/                  number guessing game : input + rng + fmt + build_info
   roller/                 dice roller          :         rng + fmt + build_info
   greeter/                greeter              : input +       fmt + build_info
+  tally/                  die-roll histogram   :         rng +       build_info
 ```
 
 ## Dependency subsets
@@ -25,9 +26,12 @@ apps/
 | guess    |   x   |  x  |  x  |           x            |
 | roller   |       |  x  |  x  |           x            |
 | greeter  |   x   |     |  x  |           x            |
+| tally    |       |  x  |     |           x            |
 
 Because the closures differ per target, extracting the *minimal* closure of a
-single app produces a genuinely smaller, flatter, standalone tree.
+single app produces a genuinely smaller, flatter, standalone tree. `tally` is
+deliberately the one app with **no third-party dependency at all** — it exists to
+show what the extracted tree looks like when there is nothing to re-declare.
 
 ## Build & test
 
@@ -71,6 +75,33 @@ How it works — it combines three sources of truth:
 Because the apps touch different library subsets, the extracted trees differ:
 `roller` contains no `input`, `greeter` contains no `rng`.
 
+### A closure with no third-party dependency
+
+`tally` links only `rng` and `build_info`, so its extracted `CMakeLists.txt`
+drops the whole FetchContent section — and, having nothing to link, emits no
+`target_link_libraries` either:
+
+```cmake
+cmake_minimum_required(VERSION 3.20)
+project(tally_standalone LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+add_executable(tally
+  src/rng/rng.cpp
+  src/tally/main.cpp
+)
+target_include_directories(tally PRIVATE include generated)
+```
+
+The tree is four files — two sources, one header, one generated header — and its
+build directory contains no `_deps/`, so it configures and builds with **no
+network access at all**. The generated `build_info.hpp` still arrives, which is
+the point: generated code is frozen into the tree, while third-party code is the
+only thing left to fetch. With `--with-tests` it also picks up `rng_test`, which
+likewise needs nothing external, so the closure stays dependency-free.
+
 ### Carrying the tests over (`--with-tests`)
 
 By default the extracted tree holds application code only — test targets are not
@@ -96,6 +127,7 @@ note: skipping test 'rng_test' -- it needs rng, not in greeter's closure
 | guess   | `input_test`, `rng_test` |
 | roller  | `rng_test`             |
 | greeter | `input_test`           |
+| tally   | `rng_test`             |
 
 Since the libraries are flattened away, each test compiles the library sources
 it used to link; the emitted `CMakeLists.txt` gains `enable_testing()`, one

@@ -388,4 +388,7 @@ came along still behaves.
 - **Standalone** — first-party code is copied with its include structure intact
   (Stage 8), generated code is frozen in place (Stage 7/8), and third-party code
   is reproduced through the project's own FetchContent declarations (Stage 4/9).
-  Nothing points back at the parent repo.
+  Nothing points back at the parent repo. When a target has no third-party
+  dependency at all (`tally`), Stage 9 emits neither the FetchContent section nor
+  any `target_link_libraries`, and the extracted tree then configures and builds
+  with no network access whatsoever.
