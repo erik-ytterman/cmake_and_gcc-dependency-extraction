@@ -28,7 +28,9 @@ Terms used throughout. Skim now, refer back as needed.
 | Term | Meaning |
 |---|---|
 | **Translation unit (TU)** | One source file *plus every header it includes*, as the compiler sees it after preprocessing. One `.cpp` → one TU → one object file → one depfile. It is the unit the compiler actually reasons about, which is why per-TU facts are so precise. |
-| **Closure** | Everything transitively reachable from a starting point. *Target closure*: every library an app links, directly or through another library. *Header closure*: every header a TU includes, directly or through another header. |
+| **Closure** | Everything transitively reachable from a starting point. *Target closure*: every library an app links, directly or through another library. *Header closure*: every header a TU includes, directly or through another header. Both get a fuller treatment in section 3. |
+| **Target graph** | The directed graph of CMake targets and the "links against" edges between them. The codemodel is its only trustworthy source. See section 3. |
+| **Dependency boundary** | The line between code the extractor copies (first-party) and code it re-declares so the tree re-fetches it (third-party). Drawn from the project's own dependency declarations. See section 3. |
 | **Depfile** (`.d` file) | A small file in Makefile syntax that the compiler writes next to each object file, listing that TU's header closure. Produced by `-MMD`. |
 | **Codemodel** | The CMake File API object describing a configured build: its targets, their sources, include directories and link edges. |
 | **First-party / third-party** | Code the project owns versus code it pulls in from outside. The boundary is drawn from the project's own dependency declarations — never from a path pattern. |
@@ -131,6 +133,61 @@ actually a registered test.
 
 Each is a *fact produced by the build*, not a guess about it. That is the whole
 design principle. The rest of this tutorial is learning to query them.
+
+The right-hand column names the three things you have to get right, so it is
+worth being precise about what each one is.
+
+### The target graph
+
+The directed graph whose nodes are CMake targets — executables, libraries — and
+whose edges are "links against". Walking it outward from one app gives that app's
+**target closure**: every library whose compiled code can end up in the binary.
+
+This is what decides *which source files* the extraction copies. Get it wrong in
+one direction and the extracted tree fails to link; get it wrong in the other and
+you have copied libraries the app never used, which defeats the point.
+
+Only the codemodel knows this graph (Lab 1), because only CMake resolved the
+variables, generator expressions and subdirectory scopes that produced the edges.
+One caveat that costs people real time: `dependencies[]` encodes *build
+ordering*, so targets with nothing to build are absent from it — see Trap 2.
+
+### The header closure
+
+For one translation unit, the set of headers the preprocessor actually reached,
+following includes transitively.
+
+Note the four things it is *not*: not every header in the repo, not every header
+under an include directory, not every header named in an `#include` line (some
+are behind `#if`), and not every header a *different* app needed. It is the real,
+post-preprocessor set for this specific TU.
+
+This is what decides *which header files* the extraction copies, and it is where
+minimality actually comes from — a header that exists but was never included
+never enters the tree. Only the compiler knows it, because only the compiler ran
+the preprocessor. `-MMD` is how you ask (Lab 2).
+
+### The dependency boundary
+
+The line between code you **copy** and code you **re-declare**.
+
+First-party code is copied into the extracted tree. Third-party code is not —
+instead the project's own dependency declaration is reproduced, so the standalone
+tree re-fetches the same pinned version the parent built against. That is what
+keeps the result both self-contained and small: you get `fmt` 10.2.1 without
+carrying a copy of `fmt` around.
+
+Drawing this line wrong is costly in both directions. Put the boundary too far
+out and you vendor a stale, partial snapshot of somebody else's library — that is
+exactly Trap 1, and it built fine while being wrong. Put it too far in and the
+extracted tree does not build at all, because code you assumed was external is
+declared nowhere.
+
+The authority has to be the project's *own* declarations — here
+`FetchContent_Declare` — for two reasons: they are the only statement of what
+this project considers external, and they carry the version pin that has to
+travel with the extraction. Lab 3 shows how to turn those declarations into a
+test you can apply to any file.
 
 ---
 
