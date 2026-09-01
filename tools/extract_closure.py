@@ -39,245 +39,33 @@ from pathlib import Path
 SOURCE_EXTS = {".c", ".cc", ".cpp", ".cxx"}
 
 
-# --- CMake File API -----------------------------------------------------------
-
-def load_codemodel(build_dir: Path) -> tuple[Path, dict]:
-    """Ensure a codemodel reply exists and return (reply_dir, codemodel_json)."""
-    api = build_dir / ".cmake" / "api" / "v1"
-    query = api / "query"
-    query.mkdir(parents=True, exist_ok=True)
-    (query / "codemodel-v2").touch()
-
-    # Reconfigure using the existing cache so the reply is (re)generated.
-    subprocess.run(["cmake", str(build_dir)], check=True,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
-
-    reply = api / "reply"
-    index = sorted(reply.glob("index-*.json"))[-1]
-    idx = json.loads(index.read_text())
-    cm_ref = next(o for o in idx["objects"] if o["kind"] == "codemodel")
-    cm = json.loads((reply / cm_ref["jsonFile"]).read_text())
-    return reply, cm
-
-
-def load_targets(reply: Path, cm: dict) -> tuple[dict, dict, dict]:
-    """Return (id -> target_json, name -> id, id -> directory index)."""
-    config = cm["configurations"][0]
-    by_id, name_to_id, dir_of = {}, {}, {}
-    for t in config["targets"]:
-        tj = json.loads((reply / t["jsonFile"]).read_text())
-        by_id[t["id"]] = tj
-        name_to_id[tj["name"]] = t["id"]
-        dir_of[t["id"]] = t["directoryIndex"]
-    return by_id, name_to_id, dir_of
+# ---------------------------------------------------------------------------
+# Execution order
+# ---------------------------------------------------------------------------
+# main() parses the CLI and calls extract(), which drives this pipeline:
+#
+#    1. load_codemodel      -- (re)configure the build, read the File API reply
+#    2. load_targets        -- index every target JSON by id / name / directory
+#    3. parse_fetchcontent  -- lift the FetchContent_Declare blocks from the
+#                              top-level CMakeLists.txt
+#    4. external_regions    -- map every third-party directory to its dep
+#    5. transitive_closure  -- walk the link graph from the requested target
+#    6. classify            -- split that closure into first-party vs external
+#         region_owner / is_under  -- path lookups steps 4 and 6 rely on
+#    7. ctest_registry + select_tests -- (--with-tests) pick covering tests
+#    8. collect_sources     -- list the source files actually compiled
+#    9. parse_depfile       -- read the per-TU *.o.d files for the header closure
+#   10. longest_root        -- file each header under its include root
+#   11. write_cmakelists / write_readme -- emit the standalone tree
+#   12. verify_build        -- (--verify) configure + build + ctest the result
+#
+# The functions below are defined in that same order, so reading top to bottom
+# follows the flow of a single extract() run.
+# ---------------------------------------------------------------------------
 
 
-def transitive_closure(root_id: str, by_id: dict) -> set[str]:
-    seen, stack = set(), [root_id]
-    while stack:
-        i = stack.pop()
-        if i in seen:
-            continue
-        seen.add(i)
-        for dep in by_id[i].get("dependencies", []):
-            stack.append(dep["id"])
-    return seen
-
-
-# --- Third-party (FetchContent) parsing ---------------------------------------
-
-def parse_fetchcontent(cml_text: str) -> dict:
-    """Map declared name -> {'block': original text, 'link': alias to link}."""
-    decls = {}
-    for m in re.finditer(r"FetchContent_Declare\s*\(\s*(\w+)(.*?)\n\)",
-                          cml_text, re.S):
-        name = m.group(1)
-        decls[name] = {"block": m.group(0), "link": f"{name}::{name}"}
-    return decls
-
-
-def external_regions(cm: dict, by_id: dict, dir_of: dict, fetch: dict,
-                     top_source: Path, top_build: Path) -> dict[Path, str]:
-    """Map every third-party directory (source *and* build side) to the
-    FetchContent declaration that owns it.
-
-    This is what keeps `_deps/` content out of the extracted tree. It cannot be
-    done by root containment alone: FetchContent populates under the build dir,
-    so a dependency's headers are "under top_build" exactly like genuinely
-    generated ones. Two signals identify the third-party directories instead,
-    both read off the configured build rather than guessed from file names:
-
-    * a CMake directory that defines a target named after a
-      `FetchContent_Declare` -- the common case (`fmt` -> target `fmt`);
-    * a directory FetchContent populated at `<build>/_deps/<name>-src`, which
-      also catches deps whose target names differ from the declared name.
-
-    Child directories inherit their parent's owner, so a dependency that calls
-    `add_subdirectory()` internally is covered too.
-    """
-    dirs = cm["configurations"][0]["directories"]
-    owner: dict[int, str] = {}
-
-    deps_base = (top_build / "_deps").resolve()
-    declared = {n.lower(): n for n in fetch}
-    for i, d in enumerate(dirs):
-        src = (top_source / d["source"]).resolve()
-        if src.parent == deps_base and src.name.endswith("-src"):
-            name = declared.get(src.name[:-len("-src")].lower())
-            if name:
-                owner[i] = name
-
-    # A top-level directory is the project's own by definition; never let a
-    # name collision there mark the whole tree third-party.
-    top_level = {i for i, d in enumerate(dirs) if "parentIndex" not in d}
-    for tid, tj in by_id.items():
-        if tj["name"] in fetch and dir_of[tid] not in top_level:
-            owner.setdefault(dir_of[tid], tj["name"])
-
-    stack = list(owner)
-    while stack:
-        i = stack.pop()
-        for child in dirs[i].get("childIndexes", []):
-            if child not in owner:
-                owner[child] = owner[i]
-                stack.append(child)
-
-    regions: dict[Path, str] = {}
-    for i, name in owner.items():
-        regions[(top_source / dirs[i]["source"]).resolve()] = name
-        regions[(top_build / dirs[i]["build"]).resolve()] = name
-    return regions
-
-
-def region_owner(path: Path, regions: dict[Path, str]) -> str | None:
-    """Name of the dependency owning `path`, or None if it is not third-party."""
-    best_root, best_name = None, None
-    for root, name in regions.items():
-        if is_under(path, root) and (best_root is None
-                                     or len(str(root)) > len(str(best_root))):
-            best_root, best_name = root, name
-    return best_name
-
-
-def classify(tids, by_id: dict, regions: dict, fetch: dict,
-             top_source: Path) -> tuple[list, list]:
-    """Split target ids into (first-party target JSONs, external dep names)."""
-    first_party, externals = [], []
-    for tid in sorted(tids):
-        tj = by_id[tid]
-        # A target is third-party if it lives in a dependency's directory; the
-        # name check still covers a dep declared but not yet populated.
-        owner = region_owner((top_source / tj["paths"]["source"]).resolve(),
-                             regions)
-        if owner is None and tj["name"] in fetch:
-            owner = tj["name"]
-        if owner is not None:
-            externals.append(owner)
-        else:
-            first_party.append(tj)
-    return first_party, externals
-
-
-# --- test discovery (--with-tests) --------------------------------------------
-
-def ctest_registry(build_dir: Path, top_build: Path,
-                   by_id: dict) -> dict[str, str]:
-    """Map registered test name -> target id.
-
-    `ctest --show-only=json-v1` is the authority for what is actually a test;
-    the owning target is then recovered by matching each test's command against
-    the targets' build artifacts. Nothing is inferred from naming conventions
-    like `*_test`, so a test target named anything at all is still found.
-    """
-    try:
-        out = subprocess.run(["ctest", "--show-only=json-v1"], cwd=build_dir,
-                             check=True, capture_output=True, text=True).stdout
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
-        print("warning: could not query ctest; extracting no tests",
-              file=sys.stderr)
-        return {}
-
-    by_artifact = {}
-    for tid, tj in by_id.items():
-        for art in tj.get("artifacts", []):
-            by_artifact[(top_build / art["path"]).resolve()] = tid
-
-    registry = {}
-    for t in json.loads(out).get("tests", []):
-        cmd = t.get("command") or []
-        if not cmd:
-            continue
-        tid = by_artifact.get(Path(cmd[0]).resolve())
-        if tid:  # skip tests that run a script or an external program
-            registry[t["name"]] = tid
-    return registry
-
-
-def select_tests(registry: dict, by_id: dict, first_party: list, regions: dict,
-                 fetch: dict, top_source: Path) -> tuple[list, list]:
-    """Pick the tests that exercise code the extracted tree already contains.
-
-    A test is taken only when every first-party target it links (beyond itself)
-    is already in the application's closure. That preserves minimality: adding
-    tests can never drag in a library the application itself does not use. A
-    test covering code outside the closure is reported as skipped rather than
-    silently dropped.
-    """
-    have = {tj["name"] for tj in first_party}
-    selected, skipped = [], []
-    for name, tid in sorted(registry.items()):
-        t_first, t_ext = classify(transitive_closure(tid, by_id), by_id,
-                                  regions, fetch, top_source)
-        needs = {tj["name"] for tj in t_first} - {by_id[tid]["name"]}
-        if not needs:
-            continue  # self-contained: exercises none of the closure's code
-        if needs <= have:
-            selected.append({"name": name, "target": by_id[tid]["name"],
-                             "id": tid, "first_party": t_first,
-                             "externals": sorted(set(t_ext))})
-        else:
-            skipped.append((name, sorted(needs - have)))
-    return selected, skipped
-
-
-def collect_sources(targets: list, top_source: Path) -> list:
-    """(origin target name, absolute path) for every source actually compiled."""
-    found = []
-    for tj in targets:
-        for s in tj.get("sources", []):
-            if s.get("compileGroupIndex") is None:
-                continue  # not actually compiled (e.g. header listed as source)
-            p = (top_source / s["path"]).resolve()
-            if p.suffix in SOURCE_EXTS:
-                found.append((tj["name"], p))
-    return sorted(set(found))
-
-
-# --- .d dependency-file parsing -----------------------------------------------
-
-def parse_depfile(path: Path) -> set[Path]:
-    text = path.read_text().replace("\\\n", " ")
-    if ":" in text:
-        text = text.split(":", 1)[1]
-    return {Path(tok) for tok in text.split() if tok and tok != "\\"}
-
-
-# --- helpers ------------------------------------------------------------------
-
-def longest_root(path: Path, roots: list[Path]) -> Path | None:
-    best = None
-    for r in roots:
-        try:
-            path.relative_to(r)
-        except ValueError:
-            continue
-        if best is None or len(str(r)) > len(str(best)):
-            best = r
-    return best
-
-
-# --- main extraction ----------------------------------------------------------
-
+# Pipeline driver: runs steps 1..12, each implemented by a function defined below
+# in the order it is first reached here.
 def extract(target: str, src_root: Path, build_dir: Path, out_root: Path,
             verify: bool, with_tests: bool) -> None:
     reply, cm = load_codemodel(build_dir)
@@ -408,6 +196,149 @@ def extract(target: str, src_root: Path, build_dir: Path, out_root: Path,
         verify_build(out, target, bool(tests))
 
 
+# Step 1: (re)configure the build dir and read the CMake File API codemodel.
+def load_codemodel(build_dir: Path) -> tuple[Path, dict]:
+    """Ensure a codemodel reply exists and return (reply_dir, codemodel_json)."""
+    api = build_dir / ".cmake" / "api" / "v1"
+    query = api / "query"
+    query.mkdir(parents=True, exist_ok=True)
+    (query / "codemodel-v2").touch()
+
+    # Reconfigure using the existing cache so the reply is (re)generated.
+    subprocess.run(["cmake", str(build_dir)], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+
+    reply = api / "reply"
+    index = sorted(reply.glob("index-*.json"))[-1]
+    idx = json.loads(index.read_text())
+    cm_ref = next(o for o in idx["objects"] if o["kind"] == "codemodel")
+    cm = json.loads((reply / cm_ref["jsonFile"]).read_text())
+    return reply, cm
+
+
+# Step 2: index every target's JSON by id, by name, and by owning directory.
+def load_targets(reply: Path, cm: dict) -> tuple[dict, dict, dict]:
+    """Return (id -> target_json, name -> id, id -> directory index)."""
+    config = cm["configurations"][0]
+    by_id, name_to_id, dir_of = {}, {}, {}
+    for t in config["targets"]:
+        tj = json.loads((reply / t["jsonFile"]).read_text())
+        by_id[t["id"]] = tj
+        name_to_id[tj["name"]] = t["id"]
+        dir_of[t["id"]] = t["directoryIndex"]
+    return by_id, name_to_id, dir_of
+
+
+# Step 3: lift the FetchContent_Declare blocks from the top-level CMakeLists.txt.
+def parse_fetchcontent(cml_text: str) -> dict:
+    """Map declared name -> {'block': original text, 'link': alias to link}."""
+    decls = {}
+    for m in re.finditer(r"FetchContent_Declare\s*\(\s*(\w+)(.*?)\n\)",
+                          cml_text, re.S):
+        name = m.group(1)
+        decls[name] = {"block": m.group(0), "link": f"{name}::{name}"}
+    return decls
+
+
+# Step 4: map every third-party source/build directory to the dep that owns it.
+def external_regions(cm: dict, by_id: dict, dir_of: dict, fetch: dict,
+                     top_source: Path, top_build: Path) -> dict[Path, str]:
+    """Map every third-party directory (source *and* build side) to the
+    FetchContent declaration that owns it.
+
+    This is what keeps `_deps/` content out of the extracted tree. It cannot be
+    done by root containment alone: FetchContent populates under the build dir,
+    so a dependency's headers are "under top_build" exactly like genuinely
+    generated ones. Two signals identify the third-party directories instead,
+    both read off the configured build rather than guessed from file names:
+
+    * a CMake directory that defines a target named after a
+      `FetchContent_Declare` -- the common case (`fmt` -> target `fmt`);
+    * a directory FetchContent populated at `<build>/_deps/<name>-src`, which
+      also catches deps whose target names differ from the declared name.
+
+    Child directories inherit their parent's owner, so a dependency that calls
+    `add_subdirectory()` internally is covered too.
+    """
+    dirs = cm["configurations"][0]["directories"]
+    owner: dict[int, str] = {}
+
+    deps_base = (top_build / "_deps").resolve()
+    declared = {n.lower(): n for n in fetch}
+    for i, d in enumerate(dirs):
+        src = (top_source / d["source"]).resolve()
+        if src.parent == deps_base and src.name.endswith("-src"):
+            name = declared.get(src.name[:-len("-src")].lower())
+            if name:
+                owner[i] = name
+
+    # A top-level directory is the project's own by definition; never let a
+    # name collision there mark the whole tree third-party.
+    top_level = {i for i, d in enumerate(dirs) if "parentIndex" not in d}
+    for tid, tj in by_id.items():
+        if tj["name"] in fetch and dir_of[tid] not in top_level:
+            owner.setdefault(dir_of[tid], tj["name"])
+
+    stack = list(owner)
+    while stack:
+        i = stack.pop()
+        for child in dirs[i].get("childIndexes", []):
+            if child not in owner:
+                owner[child] = owner[i]
+                stack.append(child)
+
+    regions: dict[Path, str] = {}
+    for i, name in owner.items():
+        regions[(top_source / dirs[i]["source"]).resolve()] = name
+        regions[(top_build / dirs[i]["build"]).resolve()] = name
+    return regions
+
+
+# Step 5: walk the link graph from a target to every target it transitively needs.
+def transitive_closure(root_id: str, by_id: dict) -> set[str]:
+    seen, stack = set(), [root_id]
+    while stack:
+        i = stack.pop()
+        if i in seen:
+            continue
+        seen.add(i)
+        for dep in by_id[i].get("dependencies", []):
+            stack.append(dep["id"])
+    return seen
+
+
+# Step 6: split a target-id closure into (first-party target JSONs, dep names).
+def classify(tids, by_id: dict, regions: dict, fetch: dict,
+             top_source: Path) -> tuple[list, list]:
+    """Split target ids into (first-party target JSONs, external dep names)."""
+    first_party, externals = [], []
+    for tid in sorted(tids):
+        tj = by_id[tid]
+        # A target is third-party if it lives in a dependency's directory; the
+        # name check still covers a dep declared but not yet populated.
+        owner = region_owner((top_source / tj["paths"]["source"]).resolve(),
+                             regions)
+        if owner is None and tj["name"] in fetch:
+            owner = tj["name"]
+        if owner is not None:
+            externals.append(owner)
+        else:
+            first_party.append(tj)
+    return first_party, externals
+
+
+# Helper for steps 4 and 6: name of the dependency owning `path`, else None.
+def region_owner(path: Path, regions: dict[Path, str]) -> str | None:
+    """Name of the dependency owning `path`, or None if it is not third-party."""
+    best_root, best_name = None, None
+    for root, name in regions.items():
+        if is_under(path, root) and (best_root is None
+                                     or len(str(root)) > len(str(best_root))):
+            best_root, best_name = root, name
+    return best_name
+
+
+# Low-level path test used by region_owner and throughout extract().
 def is_under(path: Path, root: Path) -> bool:
     try:
         path.resolve().relative_to(root.resolve())
@@ -416,6 +347,104 @@ def is_under(path: Path, root: Path) -> bool:
         return False
 
 
+# Step 7a (--with-tests): map each registered CTest test name to its target id.
+def ctest_registry(build_dir: Path, top_build: Path,
+                   by_id: dict) -> dict[str, str]:
+    """Map registered test name -> target id.
+
+    `ctest --show-only=json-v1` is the authority for what is actually a test;
+    the owning target is then recovered by matching each test's command against
+    the targets' build artifacts. Nothing is inferred from naming conventions
+    like `*_test`, so a test target named anything at all is still found.
+    """
+    try:
+        out = subprocess.run(["ctest", "--show-only=json-v1"], cwd=build_dir,
+                             check=True, capture_output=True, text=True).stdout
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        print("warning: could not query ctest; extracting no tests",
+              file=sys.stderr)
+        return {}
+
+    by_artifact = {}
+    for tid, tj in by_id.items():
+        for art in tj.get("artifacts", []):
+            by_artifact[(top_build / art["path"]).resolve()] = tid
+
+    registry = {}
+    for t in json.loads(out).get("tests", []):
+        cmd = t.get("command") or []
+        if not cmd:
+            continue
+        tid = by_artifact.get(Path(cmd[0]).resolve())
+        if tid:  # skip tests that run a script or an external program
+            registry[t["name"]] = tid
+    return registry
+
+
+# Step 7b (--with-tests): keep only tests fully covered by the app's closure.
+def select_tests(registry: dict, by_id: dict, first_party: list, regions: dict,
+                 fetch: dict, top_source: Path) -> tuple[list, list]:
+    """Pick the tests that exercise code the extracted tree already contains.
+
+    A test is taken only when every first-party target it links (beyond itself)
+    is already in the application's closure. That preserves minimality: adding
+    tests can never drag in a library the application itself does not use. A
+    test covering code outside the closure is reported as skipped rather than
+    silently dropped.
+    """
+    have = {tj["name"] for tj in first_party}
+    selected, skipped = [], []
+    for name, tid in sorted(registry.items()):
+        t_first, t_ext = classify(transitive_closure(tid, by_id), by_id,
+                                  regions, fetch, top_source)
+        needs = {tj["name"] for tj in t_first} - {by_id[tid]["name"]}
+        if not needs:
+            continue  # self-contained: exercises none of the closure's code
+        if needs <= have:
+            selected.append({"name": name, "target": by_id[tid]["name"],
+                             "id": tid, "first_party": t_first,
+                             "externals": sorted(set(t_ext))})
+        else:
+            skipped.append((name, sorted(needs - have)))
+    return selected, skipped
+
+
+# Step 8: list the source files actually compiled for the given targets.
+def collect_sources(targets: list, top_source: Path) -> list:
+    """(origin target name, absolute path) for every source actually compiled."""
+    found = []
+    for tj in targets:
+        for s in tj.get("sources", []):
+            if s.get("compileGroupIndex") is None:
+                continue  # not actually compiled (e.g. header listed as source)
+            p = (top_source / s["path"]).resolve()
+            if p.suffix in SOURCE_EXTS:
+                found.append((tj["name"], p))
+    return sorted(set(found))
+
+
+# Step 9: read one GCC/Clang .d depfile into the set of paths it lists.
+def parse_depfile(path: Path) -> set[Path]:
+    text = path.read_text().replace("\\\n", " ")
+    if ":" in text:
+        text = text.split(":", 1)[1]
+    return {Path(tok) for tok in text.split() if tok and tok != "\\"}
+
+
+# Step 10: pick the most specific include root a header sits under.
+def longest_root(path: Path, roots: list[Path]) -> Path | None:
+    best = None
+    for r in roots:
+        try:
+            path.relative_to(r)
+        except ValueError:
+            continue
+        if best is None or len(str(r)) > len(str(best)):
+            best = r
+    return best
+
+
+# Step 11: emit the standalone CMakeLists.txt for the extracted tree.
 def write_cmakelists(out: Path, target: str, cxx_std: str,
                      sources: list[str], used_include: bool,
                      used_generated: bool, fetch: dict, externals: list[str],
@@ -467,6 +496,7 @@ def write_cmakelists(out: Path, target: str, cxx_std: str,
     (out / "CMakeLists.txt").write_text("\n".join(lines))
 
 
+# Step 11: emit the README.md for the extracted tree.
 def write_readme(out: Path, target: str, first_party: list[dict],
                  externals: list[str], tests: list[dict]) -> None:
     fp = ", ".join(sorted(t["name"] for t in first_party))
@@ -486,6 +516,7 @@ def write_readme(out: Path, target: str, first_party: list[dict],
     (out / "README.md").write_text(body)
 
 
+# Step 12 (--verify): configure, build and (if any tests) ctest the output tree.
 def verify_build(out: Path, target: str, run_tests: bool) -> None:
     print(f"\n--- verifying build of extracted '{target}' ---")
     subprocess.run(["cmake", "-S", str(out), "-B", str(out / "build")],
@@ -498,6 +529,7 @@ def verify_build(out: Path, target: str, run_tests: bool) -> None:
           f"{' and tested' if run_tests else ''} successfully ---")
 
 
+# Entry point: parse CLI args, then hand off to extract().
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
