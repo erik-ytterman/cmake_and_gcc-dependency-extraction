@@ -84,8 +84,9 @@ How it works — it combines three sources of truth:
 Because the apps touch different library subsets, the extracted trees differ:
 `roller` contains no `input`, `greeter` contains no `rng`.
 
-For a bigger repo — many top-level executables, a deep submodule tree, several
-fetched dependencies — see [TUTORIAL.md §11](TUTORIAL.md).
+For a bigger repo — many top-level executables, a first-party library tree many
+`add_subdirectory()` levels deep, several fetched dependencies — see
+[TUTORIAL.md §11](TUTORIAL.md).
 
 ### A closure with no third-party dependency
 

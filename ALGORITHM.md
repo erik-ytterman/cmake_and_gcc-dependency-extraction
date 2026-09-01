@@ -11,7 +11,7 @@ its **purpose**, a concrete **input** and **output**, and the **algorithm** in
 between.
 
 The goal of the whole pipeline: given one application target `T`, produce a flat,
-standalone, buildable directory containing exactly `T`'s minimal code closure
+standalone, buildable directory containing exactly `T`'s minimal build closure
 (first-party sources + headers + generated code), with third-party dependencies
 kept as FetchContent declarations rather than copied.
 
@@ -67,7 +67,7 @@ compiler.
 | 1  | `load_codemodel()`        | the build dir | the File API codemodel JSON |
 | 2  | `load_targets()`          | the codemodel | per-target JSON + lookup maps |
 | 3  | `gather_fetchcontent()` + `parse_fetchcontent()` | `CMakeLists.txt` + its `include()`s | the `FetchContent_Declare` blocks |
-| 4  | `external_regions()`      | the directory tree | third-party dirs → owning dep |
+| 4  | `external_regions()`      | the directory tree | third-party dirs → owning dependency |
 | 5  | `transitive_closure()`    | the root target id | every target id it links |
 | 6  | `classify()`              | that closure | first-party targets vs external names |
 | 7  | `ctest_registry()` + `select_tests()` | the CTest registry | the covering tests to carry over |
@@ -95,12 +95,12 @@ depend on", replacing fragile parsing of `CMakeLists.txt` or Graphviz output.
 build/
 ```
 
-**Output:** `(reply_dir, codemodel_json)`.
+**Output:** `(reply_dir, codemodel)`.
 
 ```
 reply_dir = …/build/.cmake/api/v1/reply/
 
-codemodel_json = {
+codemodel = {
   "paths": { "source": "…", "build": "…/build" },
   "configurations": [ {
       "targets":     [ { "name", "id", "jsonFile", "directoryIndex" }, … ],
@@ -208,7 +208,8 @@ mapping) and Stage 6 (partition) need `fetch` to recognise a dependency.
 
 ## Stage 4 — Map the third-party filesystem regions
 
-**Function:** `external_regions()` (helpers `region_owner()`, `is_under()`)
+**Function:** `external_regions()` builds the map; `region_owner()` / `is_under()`
+query it in later stages.
 
 **Purpose:** Mark off the *regions of the filesystem* that third-party content
 occupies, so no later stage can ever copy from them. This is what keeps `_deps/`
@@ -239,8 +240,8 @@ directories[]:
 **Algorithm:**
 - Mark a `directories[]` entry as owned by `<name>` when *either* signal fires:
   - its source dir is exactly `<build>/_deps/<name>-src`, the dir FetchContent
-    populates — this also catches deps whose target name differs from the
-    declared name; or
+    populates — this also catches dependencies whose target name differs from
+    the declared name; or
   - it defines a target whose `name` equals a declared `<name>` **and** it is not
     a top-level directory (a name collision at the top must never blank the whole
     tree).
@@ -323,7 +324,7 @@ lives in:
 - `region_owner(<target source dir>)` is set → **external**, owned by that name
   (`fmt`'s source dir is `…/build/_deps/fmt-src`, a region root);
 - else the target `name` is a declared FetchContent name → **external**
-  (fallback for a dep declared but not yet populated);
+  (fallback for a dependency declared but not yet populated);
 - else → **first-party** (`guess`, `input`, `rng`).
 
 **Note:** `build_info` is an `INTERFACE_LIBRARY` with no sources. Were it in the
