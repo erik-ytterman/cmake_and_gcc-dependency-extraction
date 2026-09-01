@@ -3,7 +3,7 @@
 flat, standalone, buildable directory.
 
 Inputs (all derived from an already-configured build dir):
-  * CMake File API codemodel  -> authoritative target/link graph
+  * CMake File API codemodel  -> authoritative target graph
   * .d files, one per TU       -> precise header closure actually #included
     (TU = translation unit: one .cpp plus every header it includes)
   * top-level CMakeLists.txt   -> FetchContent_Declare blocks for third-party deps
@@ -42,30 +42,34 @@ SOURCE_EXTS = {".c", ".cc", ".cpp", ".cxx"}
 # ---------------------------------------------------------------------------
 # Execution order
 # ---------------------------------------------------------------------------
-# main() parses the CLI and calls extract(), which drives this pipeline:
+# main() parses the CLI and calls extract(), which drives these stages. The
+# numbering matches ALGORITHM.md, where each stage is documented in full.
 #
 #    1. load_codemodel      -- (re)configure the build, read the File API reply
 #    2. load_targets        -- index every target JSON by id / name / directory
 #    3. parse_fetchcontent  -- lift the FetchContent_Declare blocks from the
 #                              top-level CMakeLists.txt
 #    4. external_regions    -- map every third-party directory to its dep
-#    5. transitive_closure  -- walk the link graph from the requested target
+#                              (region_owner / is_under are its path lookups,
+#                              reused by stages 6, 8 and 10)
+#    5. transitive_closure  -- walk the target graph from the requested target
 #    6. classify            -- split that closure into first-party vs external
-#         region_owner / is_under  -- path lookups steps 4 and 6 rely on
-#    7. ctest_registry + select_tests -- (--with-tests) pick covering tests
-#    8. collect_sources     -- list the source files actually compiled
-#    9. parse_depfile       -- read the per-TU *.o.d files for the header closure
-#   10. longest_root        -- file each header under its include root
-#   11. write_cmakelists / write_readme -- emit the standalone tree
-#   12. verify_build        -- (--verify) configure + build + ctest the result
+#    7. ctest_registry + select_tests -- (--with-tests) pick the covering tests
+#    8. (inline)            -- gather include roots + the C++ standard
+#    9. collect_sources     -- list the source files actually compiled
+#   10. parse_depfile       -- read the per-TU *.o.d depfiles for the header closure
+#   11. (inline, longest_root) -- lay out the flat extracted tree
+#   12. write_cmakelists    -- emit the standalone CMakeLists.txt
+#   13. write_readme        -- emit the README.md
+#   14. verify_build        -- (--verify) configure + build + ctest the result
 #
-# The functions below are defined in that same order, so reading top to bottom
+# The functions below are defined in this order, so reading top to bottom
 # follows the flow of a single extract() run.
 # ---------------------------------------------------------------------------
 
 
-# Pipeline driver: runs steps 1..12, each implemented by a function defined below
-# in the order it is first reached here.
+# Pipeline driver: runs stages 1..14, each implemented by a function (or an
+# inline block) defined below in the order it is first reached here.
 def extract(target: str, src_root: Path, build_dir: Path, out_root: Path,
             verify: bool, with_tests: bool) -> None:
     reply, cm = load_codemodel(build_dir)
@@ -94,10 +98,10 @@ def extract(target: str, src_root: Path, build_dir: Path, out_root: Path,
                   f"{', '.join(missing)}, not in {target}'s closure",
                   file=sys.stderr)
 
-    # Test targets contribute compile settings, sources and .d files too.
+    # Test targets contribute compile settings, sources and depfiles too.
     contributing = first_party + [by_id[t["id"]] for t in tests]
 
-    # Include roots (from compile groups).
+    # Stage 8: include roots + the C++ standard (from the compile groups).
     inc_roots: set[Path] = set()
     cxx_std = "17"
     for tj in contributing:
@@ -112,16 +116,16 @@ def extract(target: str, src_root: Path, build_dir: Path, out_root: Path,
     src_inc_roots = [r for r in inc_roots if is_under(r, top_source)]
     gen_inc_roots = [r for r in inc_roots if is_under(r, top_build)]
 
-    # Sources (from the codemodel): the app's, plus each test's own closure.
-    # Because the libraries are flattened away, a test must compile the library
-    # sources it used to link -- all of which the app closure already provides.
+    # Stage 9: sources (from the codemodel) -- the app's, plus each test's own
+    # closure. Because the libraries are flattened away, a test must compile the
+    # library sources it used to link -- all already in the app's closure.
     app_sources = collect_sources(first_party, top_source)
     all_sources = set(app_sources)
     for t in tests:
         t["sources"] = collect_sources(t["first_party"], top_source)
         all_sources |= set(t["sources"])
 
-    # Headers (from .d files).
+    # Stage 10: headers (from the per-TU depfiles).
     headers: set[Path] = set()
     for tj in contributing:
         # Only per-TU compiler depfiles (`<source>.o.d`). CMake >= 4.0 also
@@ -137,7 +141,7 @@ def extract(target: str, src_root: Path, build_dir: Path, out_root: Path,
                 if is_under(pre, top_source) or is_under(pre, top_build):
                     headers.add(pre)
 
-    # --- lay out the flat output tree ---
+    # --- Stage 11: lay out the flat extracted tree ---
     out = out_root / target
     if out.exists():
         shutil.rmtree(out)
@@ -196,7 +200,7 @@ def extract(target: str, src_root: Path, build_dir: Path, out_root: Path,
         verify_build(out, target, bool(tests))
 
 
-# Step 1: (re)configure the build dir and read the CMake File API codemodel.
+# Stage 1: (re)configure the build dir and read the CMake File API codemodel.
 def load_codemodel(build_dir: Path) -> tuple[Path, dict]:
     """Ensure a codemodel reply exists and return (reply_dir, codemodel_json)."""
     api = build_dir / ".cmake" / "api" / "v1"
@@ -216,7 +220,7 @@ def load_codemodel(build_dir: Path) -> tuple[Path, dict]:
     return reply, cm
 
 
-# Step 2: index every target's JSON by id, by name, and by owning directory.
+# Stage 2: index every target's JSON by id, by name, and by owning directory.
 def load_targets(reply: Path, cm: dict) -> tuple[dict, dict, dict]:
     """Return (id -> target_json, name -> id, id -> directory index)."""
     config = cm["configurations"][0]
@@ -229,7 +233,7 @@ def load_targets(reply: Path, cm: dict) -> tuple[dict, dict, dict]:
     return by_id, name_to_id, dir_of
 
 
-# Step 3: lift the FetchContent_Declare blocks from the top-level CMakeLists.txt.
+# Stage 3: lift the FetchContent_Declare blocks from the top-level CMakeLists.txt.
 def parse_fetchcontent(cml_text: str) -> dict:
     """Map declared name -> {'block': original text, 'link': alias to link}."""
     decls = {}
@@ -240,7 +244,7 @@ def parse_fetchcontent(cml_text: str) -> dict:
     return decls
 
 
-# Step 4: map every third-party source/build directory to the dep that owns it.
+# Stage 4: map every third-party source/build directory to the dep that owns it.
 def external_regions(cm: dict, by_id: dict, dir_of: dict, fetch: dict,
                      top_source: Path, top_build: Path) -> dict[Path, str]:
     """Map every third-party directory (source *and* build side) to the
@@ -294,7 +298,7 @@ def external_regions(cm: dict, by_id: dict, dir_of: dict, fetch: dict,
     return regions
 
 
-# Step 5: walk the link graph from a target to every target it transitively needs.
+# Stage 5: transitively walk the target graph from the requested target.
 def transitive_closure(root_id: str, by_id: dict) -> set[str]:
     seen, stack = set(), [root_id]
     while stack:
@@ -307,7 +311,7 @@ def transitive_closure(root_id: str, by_id: dict) -> set[str]:
     return seen
 
 
-# Step 6: split a target-id closure into (first-party target JSONs, dep names).
+# Stage 6: split a target-id closure into (first-party target JSONs, dep names).
 def classify(tids, by_id: dict, regions: dict, fetch: dict,
              top_source: Path) -> tuple[list, list]:
     """Split target ids into (first-party target JSONs, external dep names)."""
@@ -327,7 +331,7 @@ def classify(tids, by_id: dict, regions: dict, fetch: dict,
     return first_party, externals
 
 
-# Helper for steps 4 and 6: name of the dependency owning `path`, else None.
+# Helper for stages 4, 6, 8 and 10: name of the dependency owning `path`, else None.
 def region_owner(path: Path, regions: dict[Path, str]) -> str | None:
     """Name of the dependency owning `path`, or None if it is not third-party."""
     best_root, best_name = None, None
@@ -347,7 +351,7 @@ def is_under(path: Path, root: Path) -> bool:
         return False
 
 
-# Step 7a (--with-tests): map each registered CTest test name to its target id.
+# Stage 7a (--with-tests): map each registered CTest test name to its target id.
 def ctest_registry(build_dir: Path, top_build: Path,
                    by_id: dict) -> dict[str, str]:
     """Map registered test name -> target id.
@@ -381,7 +385,7 @@ def ctest_registry(build_dir: Path, top_build: Path,
     return registry
 
 
-# Step 7b (--with-tests): keep only tests fully covered by the app's closure.
+# Stage 7b (--with-tests): keep only tests fully covered by the app's closure.
 def select_tests(registry: dict, by_id: dict, first_party: list, regions: dict,
                  fetch: dict, top_source: Path) -> tuple[list, list]:
     """Pick the tests that exercise code the extracted tree already contains.
@@ -409,7 +413,7 @@ def select_tests(registry: dict, by_id: dict, first_party: list, regions: dict,
     return selected, skipped
 
 
-# Step 8: list the source files actually compiled for the given targets.
+# Stage 9: list the source files actually compiled for the given targets.
 def collect_sources(targets: list, top_source: Path) -> list:
     """(origin target name, absolute path) for every source actually compiled."""
     found = []
@@ -423,7 +427,7 @@ def collect_sources(targets: list, top_source: Path) -> list:
     return sorted(set(found))
 
 
-# Step 9: read one GCC/Clang .d depfile into the set of paths it lists.
+# Stage 10: read one GCC/Clang .d depfile into the set of paths it lists.
 def parse_depfile(path: Path) -> set[Path]:
     text = path.read_text().replace("\\\n", " ")
     if ":" in text:
@@ -431,7 +435,7 @@ def parse_depfile(path: Path) -> set[Path]:
     return {Path(tok) for tok in text.split() if tok and tok != "\\"}
 
 
-# Step 10: pick the most specific include root a header sits under.
+# Helper for stage 11: pick the most specific include root a header sits under.
 def longest_root(path: Path, roots: list[Path]) -> Path | None:
     best = None
     for r in roots:
@@ -444,7 +448,7 @@ def longest_root(path: Path, roots: list[Path]) -> Path | None:
     return best
 
 
-# Step 11: emit the standalone CMakeLists.txt for the extracted tree.
+# Stage 12: emit the standalone CMakeLists.txt for the extracted tree.
 def write_cmakelists(out: Path, target: str, cxx_std: str,
                      sources: list[str], used_include: bool,
                      used_generated: bool, fetch: dict, externals: list[str],
@@ -496,7 +500,7 @@ def write_cmakelists(out: Path, target: str, cxx_std: str,
     (out / "CMakeLists.txt").write_text("\n".join(lines))
 
 
-# Step 11: emit the README.md for the extracted tree.
+# Stage 13: emit the README.md for the extracted tree.
 def write_readme(out: Path, target: str, first_party: list[dict],
                  externals: list[str], tests: list[dict]) -> None:
     fp = ", ".join(sorted(t["name"] for t in first_party))
@@ -516,7 +520,7 @@ def write_readme(out: Path, target: str, first_party: list[dict],
     (out / "README.md").write_text(body)
 
 
-# Step 12 (--verify): configure, build and (if any tests) ctest the output tree.
+# Stage 14 (--verify): configure, build and (if any tests) ctest the extracted tree.
 def verify_build(out: Path, target: str, run_tests: bool) -> None:
     print(f"\n--- verifying build of extracted '{target}' ---")
     subprocess.run(["cmake", "-S", str(out), "-B", str(out / "build")],

@@ -70,7 +70,7 @@ extracted/guess/
 
 How it works — it combines three sources of truth:
 
-1. **CMake File API codemodel** — the authoritative target/link graph, walked
+1. **CMake File API codemodel** — the authoritative target graph, walked
    transitively from the chosen target to find its first-party libraries.
 2. **Per-translation-unit `.d` files** (`g++ -MMD`) — for each `.cpp` and
    everything it includes, the precise set of headers actually `#included`, so

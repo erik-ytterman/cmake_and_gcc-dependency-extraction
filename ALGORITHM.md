@@ -5,9 +5,9 @@
 > hands-on and covers the traps. Come back here for stage-by-stage detail.
 
 This document walks `tools/extract_closure.py` **in the order it executes**. The
-`extract()` function is the spine of the tool; every other function is described
-here at the point `extract()` first calls it. For each stage you get its
-**purpose**, a concrete **input** and **output**, and the **algorithm** in
+`extract()` function is the spine of the extractor; every other function is
+described here at the point `extract()` first calls it. For each stage you get
+its **purpose**, a concrete **input** and **output**, and the **algorithm** in
 between.
 
 The goal of the whole pipeline: given one application target `T`, produce a flat,
@@ -77,7 +77,7 @@ compiler.
 | 11 | inline (uses `longest_root()`) | sources + headers | the flat `extracted/<T>/` tree |
 | 12 | `write_cmakelists()`      | the collected facts | a standalone `CMakeLists.txt` |
 | 13 | `write_readme()`          | the target lists | a `README.md` |
-| 14 | `verify_build()`          | the output tree | a proof it configures, builds, passes |
+| 14 | `verify_build()`          | the extracted tree | a proof it configures, builds, passes |
 
 ---
 
@@ -523,13 +523,13 @@ duplicates collapse.)
 5. Keep what remains only if it lies under `top_source` (first-party) or
    `top_build` (generated) → drops any `/usr/...` system header.
 
-Steps 4 and 5 are both required, **in that order**: `build/_deps/fmt-src/...`
-*is* under `top_build`, so step 5 alone would misfile a dependency's headers as
+Checks 4 and 5 are both required, **in that order**: `build/_deps/fmt-src/...`
+*is* under `top_build`, so check 5 alone would misfile a dependency's headers as
 generated code.
 
 ---
 
-## Stage 11 — Lay out the flat output tree
+## Stage 11 — Lay out the flat extracted tree
 
 **Function:** inline in `extract()` (uses `longest_root()`)
 
