@@ -347,9 +347,9 @@ reason).
 ```python
 tests = [
   { "name": "input_test", "target": "input_test", "id": "input_test::@…",
-    "first_party": [ <input_test JSON>, <input JSON> ], "externals": ["fmt"] },
+    "first_party": [ <input JSON>, <input_test JSON> ], "externals": ["fmt"] },
   { "name": "rng_test",   "target": "rng_test",   "id": "rng_test::@…",
-    "first_party": [ <rng_test JSON>, <rng JSON> ],   "externals": []     },
+    "first_party": [ <rng JSON>, <rng_test JSON> ],   "externals": []      },
 ]
 skipped = []
 ```
@@ -405,20 +405,24 @@ guess.compileGroups[0].languageStandard.standard = "17"
 **Output:**
 
 ```python
-src_inc_roots = [ "…/libs/input/include", "…/libs/rng/include" ]
+# both lists are built from a set — order is irrelevant
+src_inc_roots = [ "…/build/generated", "…/libs/input/include", "…/libs/rng/include" ]
 gen_inc_roots = [ "…/build/generated" ]
 cxx_std       = "17"
 ```
 
 **Algorithm:** Union all `compileGroups[].includes[].path` across the contributing
 targets, **dropping any root whose `region_owner` is set** — a first-party header
-must never be filed relative to a dependency's include root. Split what remains
-by `is_under(root, top_source)` vs `is_under(root, top_build)`. Read
+must never be filed relative to a dependency's include root. Then split what
+remains: `src_inc_roots` is every root `is_under(root, top_source)`,
+`gen_inc_roots` every root `is_under(root, top_build)`. Read
 `languageStandard.standard` when present (default `"17"`).
 
-**Note:** because `build/` is nested inside the source tree, a build-tree root is
-*also* under the source root. Stage 11 resolves the ambiguity by checking the
-build root first.
+**Note:** the two lists are *not* disjoint. Because `build/` is nested inside the
+source tree, `…/build/generated` satisfies **both** tests and lands in both
+lists. Stage 11 resolves the overlap by matching each header against
+`gen_inc_roots` first, so a generated header is filed under `generated/`, not
+`include/`.
 
 ---
 
@@ -487,10 +491,14 @@ build/apps/guess/CMakeFiles/guess.dir/src/main.cpp.o.d:
    …/build/_deps/fmt-src/include/fmt/color.h \
    …/build/_deps/fmt-src/include/fmt/format.h \
    …/build/_deps/fmt-src/include/fmt/core.h \
+   …/build/_deps/fmt-src/include/fmt/core.h \
    …/build/generated/build_info.hpp \
    …/libs/input/include/input/input.hpp \
    …/libs/rng/include/rng/rng.hpp
 ```
+
+(GCC really does list `core.h` twice; `parse_depfile()` returns a `set`, so
+duplicates collapse.)
 
 **Output:** `headers` — a set of absolute header paths.
 
