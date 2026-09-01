@@ -564,7 +564,7 @@ it to link against.
 
 ### Trap 5 — not every `.d` file in a target dir is a compiler depfile
 
-Stage 7 finds the header closure by globbing the `.d` files under each target's
+Stage 10 finds the header closure by globbing the `.d` files under each target's
 `CMakeFiles/<target>.dir/`. Every `.d` there is a per-translation-unit depfile —
 until CMake 4.0, which also writes a **link-step** depfile named `link.d` into
 the same directory, listing the object files, static archives and system
@@ -614,7 +614,7 @@ pin it to the shape you actually mean.
 2. Externals are collected per target from the *closure*, not project-wide.
    `tally` links `rng` + `build_info`, and `rng_test` links only `rng` — no path
    through either reaches `fmt`.
-3. No. Stage 7 copies only what appears in a `.d` file, and an un-included header
+3. No. Stage 10 copies only what appears in a `.d` file, and an un-included header
    never reaches the preprocessor. This is exactly the minimality guarantee.
 4. `parse_fetchcontent()` finds nothing, so the dependency looks first-party and
    its headers get copied. You would replace it with the `find_package()` calls
@@ -700,7 +700,7 @@ freely afterward.
 
 > **Optional, and not in `tools/test_tutorial.sh`.** This lab needs CMake ≥ 4.0
 > and illustrates a *diagnostic idea*, not baseline behavior. The extractor does
-> not use `link.d` today — Stage 7 only takes care to skip it (Trap 5). Read
+> not use `link.d` today — Stage 10 only takes care to skip it (Trap 5). Read
 > this if you are porting the pipeline to a project with dependencies that are
 > not FetchContent.
 
@@ -804,7 +804,7 @@ Two reasons. It needs CMake ≥ 4.0, while the project floor is 3.20 (§4) and
 `test_tutorial.sh` must pass on both. And it is a *diagnostic*, not a pipeline
 stage: `extract_closure.py` would use `link.d` only to emit warnings, never to
 decide what to copy — the three sources of truth in §3 already do that. Wiring it
-in as an optional Stage 3b is left as an exercise.
+in as an optional extra pass alongside Stage 4 is left as an exercise.
 
 ---
 

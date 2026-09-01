@@ -4,32 +4,80 @@
 > read [TUTORIAL.md](TUTORIAL.md) instead — it teaches the underlying APIs
 > hands-on and covers the traps. Come back here for stage-by-stage detail.
 
-This document describes `tools/extract_closure.py` stage by stage: for each step,
-its **purpose**, its **input**, its **output**, and the **actual algorithm** it
-runs. The goal of the whole pipeline is: given one application target `T`,
-produce a flat, standalone, buildable directory containing exactly `T`'s minimal
-code closure (first-party sources + headers + generated code), with third-party
-dependencies kept as FetchContent rather than copied.
+This document walks `tools/extract_closure.py` **in the order it executes**. The
+`extract()` function is the spine of the tool; every other function is described
+here at the point `extract()` first calls it. For each stage you get its
+**purpose**, a concrete **input** and **output**, and the **algorithm** in
+between.
 
-## Prerequisites (what the build must have produced)
+The goal of the whole pipeline: given one application target `T`, produce a flat,
+standalone, buildable directory containing exactly `T`'s minimal code closure
+(first-party sources + headers + generated code), with third-party dependencies
+kept as FetchContent declarations rather than copied.
 
-The extractor is a *consumer* of an already-configured/built tree. Before it runs:
+## The running example
+
+Every stage below is illustrated with one real run of the sample project in this
+repo:
+
+```sh
+python3 tools/extract_closure.py guess --with-tests --verify
+```
+
+`guess` links the first-party libraries `rng` and `input`, the generated
+`build_info` header, and the third-party library `fmt`. Both flags are on, so
+every optional stage runs too. Paths are abbreviated with `…` for the repo root
+`/home/.../cmake_and_gcc-dependency-extraction`.
+
+## Prerequisites (what the build must already have produced)
+
+The extractor is a *consumer* of an already-configured, already-built tree.
+Before it runs:
 
 - The project is configured into a build dir (default `build/`).
-- The build was compiled with `-MMD` so per-translation-unit `.d` header
-  dependency files exist under `build/**/CMakeFiles/<target>.dir/`.
+- The build was compiled with `-MMD` so a per-translation-unit `.d` header
+  dependency file sits next to every object file under
+  `build/**/CMakeFiles/<target>.dir/`.
 
-No source files are parsed by hand; every fact comes from CMake or the compiler.
+No source file is ever parsed by hand; every fact comes from CMake or the
+compiler.
+
+## Execution order at a glance
 
 ```
-                ┌──────────────────────────────────────────────┐
-   build/  ────▶│  1. codemodel   2. targets     3. closure     │
-   src/    ────▶│  4. partition  4b. tests*      5. roots       │──▶ extracted/<T>/
-   -MMD .d ────▶│  6. sources     7. headers     8. layout      │      (standalone)
-   ctest   ────▶│  9. CMakeLists 10. README     11. verify*     │
-                └──────────────────────────────────────────────┘
-                                        * optional (--with-tests / --verify)
+                        ┌─ Stage 1   load_codemodel ────── CMake File API reply
+  build/       ────────▶│  Stage 2   load_targets ──────── by_id / name_to_id / dir_of
+  src/         ────────▶│  Stage 3   parse_fetchcontent ── fetch{}   (from top CMakeLists.txt)
+  -MMD *.o.d   ────────▶│  Stage 4   external_regions ──── regions{}  (third-party dirs)
+  CMakeLists.txt ──────▶│  Stage 5   transitive_closure ── closure of target ids
+  ctest registry ─────▶ │  Stage 6   classify ──────────── first_party[] / externals[]
+                        │  Stage 7   select_tests * ────── tests[]
+                        │  Stage 8   (include roots) ───── src/gen include roots, cxx_std
+                        │  Stage 9   collect_sources ───── all_sources
+                        │  Stage 10  parse_depfile ─────── headers
+                        │  Stage 11  (layout) ──────────── extracted/<T>/{src,include,generated}
+                        │  Stage 12  write_cmakelists ──── extracted/<T>/CMakeLists.txt
+                        │  Stage 13  write_readme ──────── extracted/<T>/README.md
+                        └─ Stage 14  verify_build * ────── extracted/<T>/build/  (built + green)
+                                          * Stage 7 needs --with-tests, Stage 14 needs --verify
 ```
+
+| Stage | Function | Turns … | … into |
+|------:|----------|---------|--------|
+| 1  | `load_codemodel()`        | the build dir | the File API codemodel JSON |
+| 2  | `load_targets()`          | the codemodel | per-target JSON + lookup maps |
+| 3  | `parse_fetchcontent()`    | top `CMakeLists.txt` | the `FetchContent_Declare` blocks |
+| 4  | `external_regions()`      | the directory graph | third-party dirs → owning dep |
+| 5  | `transitive_closure()`    | the root target id | every target id it links |
+| 6  | `classify()`              | that closure | first-party targets vs external names |
+| 7  | `ctest_registry()` + `select_tests()` | the CTest registry | the covering tests to carry over |
+| 8  | inline in `extract()`     | the compile groups | include roots + C++ standard |
+| 9  | `collect_sources()`       | target `sources[]` | the `.cpp` files to copy |
+| 10 | `parse_depfile()`         | the `*.o.d` depfiles | the exact header set to copy |
+| 11 | inline (uses `longest_root()`) | sources + headers | the flat `extracted/<T>/` tree |
+| 12 | `write_cmakelists()`      | the collected facts | a standalone `CMakeLists.txt` |
+| 13 | `write_readme()`          | the target lists | a `README.md` |
+| 14 | `verify_build()`          | the output tree | a proof it configures, builds, passes |
 
 ---
 
@@ -38,364 +86,653 @@ No source files are parsed by hand; every fact comes from CMake or the compiler.
 **Function:** `load_codemodel()`
 
 **Purpose:** Obtain a machine-readable, authoritative description of every target
-and the link edges between them. This is the ground truth for "what does `T`
-depend on", replacing fragile parsing of `CMakeLists.txt` or Graphviz text.
+and every link edge between them. This is the ground truth for "what does `T`
+depend on", replacing fragile parsing of `CMakeLists.txt` or Graphviz output.
 
 **Input:** the build directory.
 
-**Output:** `(reply_dir, codemodel_json)` — the path to the File API reply
-directory and the parsed top-level codemodel object (which contains
-`paths.source`, `paths.build`, and the list of targets for each configuration).
+```
+build/
+```
+
+**Output:** `(reply_dir, codemodel_json)`.
+
+```
+reply_dir = …/build/.cmake/api/v1/reply/
+
+codemodel_json = {
+  "paths": { "source": "…", "build": "…/build" },
+  "configurations": [ {
+      "targets":     [ { "name", "id", "jsonFile", "directoryIndex" }, … ],
+      "directories": [ { "source", "build", "parentIndex", "childIndexes" }, … ]
+  } ]
+}
+```
 
 **Algorithm:**
-1. Create the query stub `build/.cmake/api/v1/query/codemodel-v2` (an empty file
-   whose *name* requests the codemodel object, version 2).
-2. Run `cmake <build>` — a no-op reconfigure using the existing cache. Because
+1. Create the query stub `build/.cmake/api/v1/query/codemodel-v2` — an empty file
+   whose *name* requests the codemodel object, version 2.
+2. Run `cmake <build>` — a no-op reconfigure against the existing cache. Because
    the query now exists, CMake writes a reply under
    `build/.cmake/api/v1/reply/`. (This does not re-fetch `fmt`; it is already
    populated.)
 3. Read the newest `index-*.json`, find the object whose `kind == "codemodel"`,
    and load the JSON file it points to.
 
+**Note:** reply filenames are content-hashed and change on every configure, so
+the index is the only stable entry point — never glob for `codemodel-*.json`
+directly.
+
 ---
 
-## Stage 2 — Load per-target JSON and build lookup maps
+## Stage 2 — Index every target
 
 **Function:** `load_targets()`
 
 **Purpose:** Make each target's full description (type, sources, include dirs,
-dependencies) addressable by id and by name.
+dependencies, artifacts) addressable three ways: by stable id (how link edges
+refer to targets), by name (how the CLI and FetchContent refer to them), and by
+directory index (how Stage 4 ties a target to the CMake directory that defines
+it).
 
 **Input:** the reply dir and the codemodel object.
 
-**Output:** three dicts — `by_id: id → target_json`, `name_to_id: name → id`, and
-`dir_of: id → directory index`.
+**Output:** three dicts.
 
-**Algorithm:** For the first configuration, iterate `configurations[0].targets`;
-each entry references a `jsonFile`. Load each file and index it under both its
-stable `id` (used by dependency edges) and its human `name` (used by the CLI).
-Record each target's `directoryIndex` too — Stage 4 needs it to tie a target to
-the CMake directory that defines it.
+```
+by_id      = { "guess::@bba4818aa150d7f5ff20": {<full target JSON>},
+               "fmt::@976f4f0bee90b99ecdb6":   {…}, "rng::@…": {…}, "input::@…": {…}, … }
+name_to_id = { "guess": "guess::@bba4818aa150d7f5ff20",
+               "fmt": "fmt::@976f4f0bee90b99ecdb6", "rng": "rng::@…", … }
+dir_of     = { "guess::@…": 4, "fmt::@…": 1, "rng::@…": 2, "input::@…": 3, … }
+```
+
+**Algorithm:** For `configurations[0]`, iterate `targets`; each entry references a
+`jsonFile`. Load each file and index it under both its `id` and its `name`, and
+record its `directoryIndex`.
+
+**Note:** because the top `CMakeLists.txt` calls `include(CTest)`, the codemodel
+also lists CTest's bookkeeping targets (`Nightly*`, `Experimental*`,
+`Continuous*`). They are harmless here — nothing links them, so they never enter
+a closure.
 
 ---
 
-## Stage 3 — Compute the transitive target closure
+## Stage 3 — Parse the FetchContent declarations
+
+**Function:** `parse_fetchcontent()`
+
+**Purpose:** Capture, verbatim, every third-party dependency block so the emitted
+`CMakeLists.txt` can reproduce it exactly — same repo, same pinned tag — instead
+of copying the dependency's code.
+
+**Input:** the text of the top-level `CMakeLists.txt`.
+
+```cmake
+FetchContent_Declare(
+  fmt
+  GIT_REPOSITORY https://github.com/fmtlib/fmt.git
+  GIT_TAG        10.2.1
+  GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(fmt)
+```
+
+**Output:** `fetch` — declared name → block text + default link alias.
+
+```python
+{
+  "fmt": {
+    "block": "FetchContent_Declare(\n  fmt\n  GIT_REPOSITORY https://github.com/fmtlib/fmt.git\n"
+             "  GIT_TAG        10.2.1\n  GIT_SHALLOW    TRUE\n)",
+    "link":  "fmt::fmt",
+  }
+}
+```
+
+**Algorithm:** Regex-scan for `FetchContent_Declare(<name> … )` blocks
+(`FetchContent_Declare\s*\(\s*(\w+)(.*?)\n\)`, dotall). Store the whole matched
+block unmodified and a conventional alias `<name>::<name>`.
+
+**Note:** this runs *before* the closure walk because both Stage 4 (region
+mapping) and Stage 6 (partition) need `fetch` to recognise a dependency.
+
+---
+
+## Stage 4 — Map the third-party filesystem regions
+
+**Function:** `external_regions()` (helpers `region_owner()`, `is_under()`)
+
+**Purpose:** Mark off the *regions of the filesystem* that third-party content
+occupies, so no later stage can ever copy from them. This is what keeps `_deps/`
+out of the extracted tree.
+
+**Input:** the codemodel `directories[]`, plus `by_id`, `dir_of`, `fetch`,
+`top_source`, `top_build`.
+
+```
+directories[]:
+  0  source=.                     parent=None   children=[1..7]
+  1  source=build/_deps/fmt-src    build=_deps/fmt-build   parent=0
+  2  source=libs/rng               ...
+  3  source=libs/input             ...
+  4  source=apps/guess             ...
+  ...
+```
+
+**Output:** `regions` — absolute directory → owning declaration name.
+
+```python
+{
+  "…/build/_deps/fmt-src":   "fmt",   # source side
+  "…/build/_deps/fmt-build": "fmt",   # build side
+}
+```
+
+**Algorithm:**
+- Mark a `directories[]` entry as owned by `<name>` when *either* signal fires:
+  - its source dir is exactly `<build>/_deps/<name>-src`, the dir FetchContent
+    populates — this also catches deps whose target name differs from the
+    declared name; or
+  - it defines a target whose `name` equals a declared `<name>` **and** it is not
+    a top-level directory (a name collision at the top must never blank the whole
+    tree).
+- Propagate ownership to child directories, so a dependency that calls
+  `add_subdirectory()` internally is covered too.
+- For every owned directory, emit **both** its source path and its build path
+  into `regions`.
+- `region_owner(path)` returns the owner of the *longest* region root that
+  contains `path`, else `None`. `is_under(path, root)` is the containment test it
+  is built on.
+
+**Why regions and not just root containment:** FetchContent populates *under the
+build directory*, so `build/_deps/fmt-src/include/fmt/core.h` is "under
+`top_build`" in exactly the same way a genuinely generated header is. A
+containment test alone cannot separate the two, and treating `_deps/` as
+generated code would freeze a partial snapshot of `fmt` into `generated/` — where
+it would then *shadow* the pinned version the emitted `FetchContent` block
+fetches. The directory graph is the authority that avoids this.
+
+---
+
+## Stage 5 — Walk the transitive target closure
 
 **Function:** `transitive_closure()`
 
 **Purpose:** Find every target that `T` links, directly or indirectly — the set
 of libraries whose code could end up in `T`.
 
-**Input:** the root target id (`name_to_id[T]`) and `by_id`.
+**Input:** the root id and `by_id`.
 
-**Output:** a set of target ids reachable from `T`.
+```
+root = name_to_id["guess"] = "guess::@bba4818aa150d7f5ff20"
 
-**Algorithm:** Iterative depth-first graph traversal over the `dependencies[]`
-edges in each target's codemodel JSON. Start with `T`; repeatedly pop a target,
-mark it seen, and push the ids of all its dependencies. Terminates when the
-worklist empties. For `guess` this yields `{guess, input, rng, fmt}`.
+guess.dependencies = [ "fmt::@…", "rng::@…", "input::@…" ]
+```
+
+**Output:** a set of target ids reachable from the root.
+
+```python
+{ "guess::@bba4818aa150d7f5ff20", "fmt::@976f4f0bee90b99ecdb6",
+  "rng::@56f3092fcbc80f32493b",   "input::@6d945ddea8f4ec024c33" }
+```
+
+**Algorithm:** Iterative depth-first traversal over the `dependencies[]` edges in
+each target's codemodel JSON. Start with the root; repeatedly pop a target, mark
+it seen, push the ids of its dependencies. Terminates when the worklist empties.
 
 Two things this traversal deliberately does *not* reach:
 
 - **`build_info`.** It is an `INTERFACE` library, and CMake omits such targets
   from `dependencies[]` because they impose no build ordering. Its generated
-  header still reaches the output — via Stage 7, because it appears in the apps'
-  `.d` files. The `.d` files, not the target graph, are what guarantee generated
+  header still reaches the output — via Stage 10, because it appears in the app's
+  `.d` file. The `.d` files, not the target graph, are what guarantee generated
   headers are not missed.
 - **Test targets.** The edges point `input_test → input`, never the reverse, so
-  no test is reachable from an application root. Stage 4b picks them up
+  no test is reachable from an application root. Stage 7 picks them up
   separately, and only under `--with-tests`.
 
 ---
 
-## Stage 4 — Partition first-party vs. third-party
+## Stage 6 — Partition the closure: first-party vs. third-party
 
-**Function:** `extract()` (uses `parse_fetchcontent()`, `external_regions()`,
-`region_owner()`)
+**Function:** `classify()`
 
 **Purpose:** Decide which closure members get their code copied (first-party) and
-which get re-declared as external dependencies (third-party) — and, just as
-importantly, mark off the *regions of the filesystem* that third-party content
-occupies, so later stages can never copy from them.
+which get re-declared as external dependencies (third-party).
 
-**Input:** the closure targets; the codemodel's directory graph; the set of
-`FetchContent_Declare` names parsed from the top-level `CMakeLists.txt`.
+**Input:** the closure ids, `by_id`, `regions`, `fetch`, `top_source`.
 
-**Output:** `first_party` (target JSONs), `externals` (declaration names), and
-`regions` — a map of absolute directory → owning declaration.
+**Output:** `first_party` (target JSONs) and `externals` (declaration names).
 
-**Algorithm:**
-- `parse_fetchcontent()` regex-scans the top `CMakeLists.txt` for
-  `FetchContent_Declare(<name> … )` blocks, recording for each the *verbatim
-  block text* and a default link alias `<name>::<name>`.
-- `external_regions()` walks `configurations[0].directories[]` and marks a
-  directory third-party when either signal fires:
-  - it defines a target named after a declaration (`fmt` → target `fmt`), or
-  - it is the population dir FetchContent creates at `<build>/_deps/<name>-src`
-    — which also catches deps whose target names differ from the declared name.
+```python
+first_party = [ <guess JSON>, <input JSON>, <rng JSON> ]   # sorted by id
+externals   = [ "fmt" ]
+```
 
-  Child directories inherit their parent's owner, so a dependency that calls
-  `add_subdirectory()` internally is covered. A top-level directory is never
-  marked, so a name collision there cannot blank out the whole tree. Each marked
-  directory contributes **both** its source and its build path to `regions`.
-- A closure target is **external** iff its own directory lies in a region (or,
-  as a fallback for a declared-but-unpopulated dep, its `name` is a declaration);
-  otherwise it is **first-party**.
-- Note: `build_info` is an `INTERFACE_LIBRARY` with no sources; it is first-party
-  but contributes only a generated header (picked up in Stage 7), not `.cpp`s.
+**Algorithm:** For each closure target, look at the directory its own source
+lives in:
 
-**Why regions and not just root containment:** FetchContent populates *under the
-build directory*, so `build/_deps/fmt-src/include/fmt/core.h` is "under
-`top_build`" in exactly the same way a genuinely generated header is. Containment
-tests alone therefore cannot separate the two, and treating `_deps/` as generated
-code would copy a partial, frozen snapshot of the dependency into `generated/` —
-where it would then *shadow* the pinned version the emitted `FetchContent` block
-fetches. The directory graph is the authority that avoids this.
+- `region_owner(<target source dir>)` is set → **external**, owned by that name
+  (`fmt`'s source dir is `…/build/_deps/fmt-src`, a region root);
+- else the target `name` is a declared FetchContent name → **external**
+  (fallback for a dep declared but not yet populated);
+- else → **first-party** (`guess`, `input`, `rng`).
+
+**Note:** `build_info` is an `INTERFACE_LIBRARY` with no sources. Were it in the
+closure it would land in `first_party`, but it contributes only a generated
+header (picked up in Stage 10), never a `.cpp`.
 
 ---
 
-## Stage 4b — Select tests (`--with-tests` only)
+## Stage 7 — Select the covering tests (`--with-tests` only)
 
-**Function:** `ctest_registry()`, `select_tests()`
+**Function:** `ctest_registry()`, then `select_tests()`
 
 **Purpose:** Carry over the tests that actually exercise the extracted code, so
 the standalone tree can be *validated* and not merely compiled. Skipped entirely
-without the flag, leaving the default output application-only.
+without the flag.
 
-**Input:** the configured build dir; `by_id`; the app's `first_party` list.
+**Input:** the build dir, `top_build`, `by_id`, and the app's `first_party` list.
 
-**Output:** `tests` — one record per carried-over test (registered name, target
-name, its own first-party closure, its own externals) — and a list of skipped
-tests with the reason.
+```
+ctest --show-only=json-v1  ->
+  rng_test    command[0] = …/build/libs/rng/rng_test
+  input_test  command[0] = …/build/libs/input/input_test
+```
+
+**Output:** `tests` (one record per carried-over test) and `skipped` (name +
+reason).
+
+```python
+tests = [
+  { "name": "input_test", "target": "input_test", "id": "input_test::@…",
+    "first_party": [ <input_test JSON>, <input JSON> ], "externals": ["fmt"] },
+  { "name": "rng_test",   "target": "rng_test",   "id": "rng_test::@…",
+    "first_party": [ <rng_test JSON>, <rng JSON> ],   "externals": []     },
+]
+skipped = []
+```
 
 **Algorithm:**
-1. `ctest_registry()` runs `ctest --show-only=json-v1` in the build dir. CTest is
-   the authority on what *is* a test; a target merely named `*_test` is not one
-   until `add_test()` registers it.
-2. Recover each test's target by matching `command[0]` against the targets'
-   `artifacts[].path` (resolved against `top_build`). This assumes no naming
-   convention, so a test target called anything at all is still found. Tests
-   whose command is a script or an external program match nothing and are
-   ignored.
-3. For each registered test, compute its own closure (Stage 3) and partition it
-   (Stage 4). Carry it over **iff** every first-party target it links, minus
-   itself, is already in the app's `first_party` set.
+1. `ctest_registry()` runs `ctest --show-only=json-v1` — CTest is the authority
+   on what *is* a test; a target merely named `*_test` is not one until
+   `add_test()` registers it.
+2. Recover each test's target by matching `command[0]` against every target's
+   `artifacts[].path` (resolved against `top_build`):
+   `…/build/libs/rng/rng_test` → target `rng_test`. No naming convention is
+   assumed. A test whose command is a shell script or an external program matches
+   nothing and is ignored.
+3. For each registered test, compute its own closure (Stage 5) and partition it
+   (Stage 6). Let `needs` be its first-party targets minus itself. Carry it over
+   **iff** `needs ⊆ {first-party names already in the app's closure}`.
 
-That subset rule is what keeps the guarantee from Stage 3 intact: a test can
-never introduce a library the application itself does not use. `greeter` gets
-`input_test` but not `rng_test`; `roller` the reverse; `guess` both. A test that
-fails the rule is reported on stderr rather than dropped silently. A test with no
-first-party dependencies exercises none of the closure's code and is skipped.
+**Why the subset rule:** it keeps the Stage 5 guarantee intact — a test can never
+drag in a library the application itself does not use.
+
+- `guess` (closure `{guess, rng, input, fmt}`) → keeps **both** `input_test`
+  (needs `input`) and `rng_test` (needs `rng`).
+- `greeter` (no `rng`) → keeps `input_test`, and prints
+  `note: skipping test 'rng_test' -- it needs rng, not in greeter's closure`.
+- `roller` (no `input`) → the mirror image: keeps `rng_test`, skips `input_test`.
+
+A test whose `needs` is empty exercises none of the closure's code and is skipped
+silently.
 
 ---
 
-## Stage 5 — Gather include roots and the C++ standard
+## Stage 8 — Gather include roots and the C++ standard
 
-**Function:** `extract()`
+**Function:** inline in `extract()`
 
 **Purpose:** Learn the `-I` roots each header lives under, so a copied header can
 be placed at the *same include-relative path* and existing `#include "a/b.hpp"`
-lines keep resolving without editing sources. Also capture the language standard
-for the generated CMakeLists.
+lines keep resolving with no source edits. Also capture the language standard for
+the generated `CMakeLists.txt`.
 
-**Input:** the `compileGroups[]` of every first-party target.
+**Input:** the `compileGroups[]` of every *contributing* target — the first-party
+closure plus any carried-over test target.
+
+```
+guess.compileGroups[0].includes:
+  …/libs/input/include
+  …/build/_deps/fmt-src/include      <- dropped: inside the fmt region
+  …/libs/rng/include
+  …/build/generated
+guess.compileGroups[0].languageStandard.standard = "17"
+```
 
 **Output:**
-- `src_inc_roots` — include roots under the project source tree.
-- `gen_inc_roots` — include roots under the build tree (generated headers).
-- `cxx_std` — e.g. `"17"`.
 
-**Algorithm:** Union all `compileGroups[].includes[].path` across the
-*contributing* targets — the first-party closure plus any carried-over test
-targets — **skipping any root inside a third-party region** (Stage 4): a
-first-party header must never be placed relative to a dependency's include root.
-Partition what remains by `is_under(root, top_source)` vs
-`is_under(root, top_build)`. Read `languageStandard.standard` when present.
-(Because the build dir is nested in the source tree, a build-tree root is *also*
-under the source root — Stage 8 resolves the ambiguity by checking the build
-root first.)
+```python
+src_inc_roots = [ "…/libs/input/include", "…/libs/rng/include" ]
+gen_inc_roots = [ "…/build/generated" ]
+cxx_std       = "17"
+```
+
+**Algorithm:** Union all `compileGroups[].includes[].path` across the contributing
+targets, **dropping any root whose `region_owner` is set** — a first-party header
+must never be filed relative to a dependency's include root. Split what remains
+by `is_under(root, top_source)` vs `is_under(root, top_build)`. Read
+`languageStandard.standard` when present (default `"17"`).
+
+**Note:** because `build/` is nested inside the source tree, a build-tree root is
+*also* under the source root. Stage 11 resolves the ambiguity by checking the
+build root first.
 
 ---
 
-## Stage 6 — Collect first-party sources
+## Stage 9 — Collect the first-party sources
 
-**Function:** `extract()` (uses `collect_sources()`)
+**Function:** `collect_sources()`
 
 **Purpose:** Enumerate the `.cpp` files that must be compiled into the standalone
 target: `T`'s own sources plus those of every first-party library it links — and,
-under `--with-tests`, the per-test source lists as well.
+under `--with-tests`, each test's own source list.
 
-**Input:** the `sources[]` of each first-party target; `top_source`.
+**Input:** the `sources[]` of each first-party target, and `top_source`.
 
-**Output:** `app_sources` (list of `(origin_target_name, absolute_path)` pairs),
-a per-test source list, and `all_sources` — their union, which is what gets
-copied.
+```
+guess.sources  = [ { path: "apps/guess/src/main.cpp",  compileGroupIndex: 0 } ]
+input.sources  = [ { path: "libs/input/src/input.cpp", compileGroupIndex: 0 } ]
+rng.sources    = [ { path: "libs/rng/src/rng.cpp",     compileGroupIndex: 0 } ]
+```
 
-**Algorithm:** `collect_sources()` takes each `sources[]` entry with a non-null
-`compileGroupIndex` (i.e. actually compiled, not merely a header listed as a
-source), resolves its `path` against `top_source`, and keeps it if its extension
-is a C/C++ source (`.c/.cc/.cpp/.cxx`). The `origin` name is retained so sources
-can be namespaced on copy and collisions avoided.
+**Output:** `(origin_target_name, absolute_path)` pairs.
 
-It is called once over the app's `first_party`, then once per carried-over test
-over *that test's* first-party closure. A test's list therefore contains its own
-`.cpp` plus the library sources it used to link — necessary because Stage 8
-flattens the libraries away, so there is no `input` target left for a test to
-link against. Those library sources are already in `all_sources` (Stage 4b
-guarantees the subset), so nothing extra is copied; only the compile lists
-differ.
+```python
+app_sources = [ ("guess", "…/apps/guess/src/main.cpp"),
+                ("input", "…/libs/input/src/input.cpp"),
+                ("rng",   "…/libs/rng/src/rng.cpp") ]
+
+input_test["sources"] = [ ("input",      "…/libs/input/src/input.cpp"),
+                          ("input_test", "…/libs/input/test/input_test.cpp") ]
+rng_test["sources"]   = [ ("rng",      "…/libs/rng/src/rng.cpp"),
+                          ("rng_test", "…/libs/rng/test/rng_test.cpp") ]
+
+all_sources = app_sources ∪ every test's sources
+```
+
+**Algorithm:** Keep each `sources[]` entry that has a non-null
+`compileGroupIndex` (actually compiled, not just a header listed as a source),
+resolve its `path` against `top_source`, and keep it if its extension is
+`.c/.cc/.cpp/.cxx`. Retain the `origin` name so sources can be namespaced on copy
+and collisions avoided.
+
+`collect_sources()` is called once over the app's `first_party`, then once per
+carried-over test over *that test's* first-party closure. A test's list therefore
+includes the library `.cpp` files it used to link — necessary because Stage 11
+flattens the libraries away, leaving no `input` target for a test to link
+against. Those library sources are already in `all_sources`, so nothing extra is
+copied; only the per-target compile lists differ.
 
 ---
 
-## Stage 7 — Collect the precise header closure
+## Stage 10 — Collect the precise header closure
 
-**Function:** `extract()` (uses `parse_depfile()`)
+**Function:** `parse_depfile()`
 
-**Purpose:** Copy exactly the headers that are *really* included by the closure's
-translation units — no more. This is what makes the extraction **minimal**: a
-header that exists but is never `#included` is never copied.
+**Purpose:** Copy exactly the headers the closure's translation units *really*
+included — no more. This is what makes the extraction **minimal**: a header that
+exists but is never `#included` is never copied.
 
-**Input:** the per-translation-unit `.o.d` depfiles under each first-party
-target's `*.dir/`; `top_source` and `top_build` for filtering.
+**Input:** the per-translation-unit `*.o.d` depfiles under each contributing
+target's `.dir/`.
+
+```
+build/apps/guess/CMakeFiles/guess.dir/src/main.cpp.o.d:
+
+  apps/guess/CMakeFiles/guess.dir/src/main.cpp.o: \
+   …/apps/guess/src/main.cpp \
+   …/build/_deps/fmt-src/include/fmt/color.h \
+   …/build/_deps/fmt-src/include/fmt/format.h \
+   …/build/_deps/fmt-src/include/fmt/core.h \
+   …/build/generated/build_info.hpp \
+   …/libs/input/include/input/input.hpp \
+   …/libs/rng/include/rng/rng.hpp
+```
 
 **Output:** `headers` — a set of absolute header paths.
 
-**Algorithm:**
-1. For each *contributing* target (first-party closure plus carried-over tests),
-   glob `build/**/CMakeFiles/<name>.dir/**/*.o.d` — the per-translation-unit
-   compiler depfiles. The match is `*.o.d`, not `*.d`: CMake ≥ 4.0 also writes a
-   link-step depfile `link.d` into the same `.dir/`, listing object files and
-   libraries rather than headers (see TUTORIAL.md Trap 5).
-2. `parse_depfile()` reads each Make-syntax `.d` file: it joins `\`-newline
-   continuations, drops the target before the first `:`, and splits the
-   remaining prerequisites on whitespace.
-3. Resolve each prerequisite to an absolute path and discard sources
-   (`.c/.cc/.cpp/.cxx`).
-4. Drop anything inside a third-party region (Stage 4): `fmt`'s headers come
-   back through its `FetchContent` block, never as copies.
-5. Keep what remains only if it lies under `top_source` (first-party) or
-   `top_build` (generated). System headers (`/usr/...`) fall outside both roots
-   and are dropped here.
+```python
+{ "…/build/generated/build_info.hpp",
+  "…/libs/input/include/input/input.hpp",
+  "…/libs/rng/include/rng/rng.hpp" }
+```
 
-Steps 4 and 5 are both required, and in that order: `build/_deps/fmt-src/...`
-*is* under `top_build`, so step 5 alone would happily classify a dependency's
-headers as generated code.
+**Algorithm:**
+1. For each contributing target, glob
+   `build/**/CMakeFiles/<name>.dir/**/*.o.d`. The match is `*.o.d`, not `*.d`:
+   CMake ≥ 4.0 also writes a link-step depfile `link.d` into the same `.dir/`,
+   listing object files and libraries rather than headers (TUTORIAL.md Trap 5).
+2. `parse_depfile()` reads the Make-syntax file: join `\`-newline continuations,
+   drop the target before the first `:`, split the rest on whitespace.
+3. Resolve each prerequisite to an absolute path and drop sources
+   (`.c/.cc/.cpp/.cxx`) → drops `main.cpp`.
+4. Drop anything inside a third-party region (Stage 4) → drops the three
+   `fmt/*.h`; `fmt`'s headers return through its `FetchContent` block, never as
+   copies.
+5. Keep what remains only if it lies under `top_source` (first-party) or
+   `top_build` (generated) → drops any `/usr/...` system header.
+
+Steps 4 and 5 are both required, **in that order**: `build/_deps/fmt-src/...`
+*is* under `top_build`, so step 5 alone would misfile a dependency's headers as
+generated code.
 
 ---
 
-## Stage 8 — Lay out the flat output tree
+## Stage 11 — Lay out the flat output tree
 
-**Function:** `extract()` (uses `longest_root()`)
+**Function:** inline in `extract()` (uses `longest_root()`)
 
-**Purpose:** Materialize a clean, flat directory whose layout preserves every
+**Purpose:** Materialise a clean, flat directory whose layout preserves every
 include path, so the copied sources compile unmodified.
 
-**Input:** `sources`, `headers`, `src_inc_roots`, `gen_inc_roots`, output root.
+**Input:** `all_sources`, `headers`, `src_inc_roots`, `gen_inc_roots`, the output
+root.
 
-**Output:** files written under `extracted/<T>/`, plus:
-- `cmake_sources` — source paths relative to the output dir (for `add_executable`).
-- `used_include`, `used_generated` — whether each include dir is needed.
+**Output:** files on disk under `extracted/guess/`, plus the bookkeeping the next
+stage needs.
+
+```
+extracted/guess/
+├── src/
+│   ├── guess/main.cpp
+│   ├── input/input.cpp
+│   ├── rng/rng.cpp
+│   ├── input_test/input_test.cpp
+│   └── rng_test/rng_test.cpp
+├── include/
+│   ├── input/input.hpp
+│   └── rng/rng.hpp
+└── generated/
+    └── build_info.hpp
+
+cmake_sources            = [ "src/guess/main.cpp", "src/input/input.cpp", "src/rng/rng.cpp" ]
+input_test.cmake_sources = [ "src/input/input.cpp", "src/input_test/input_test.cpp" ]
+rng_test.cmake_sources   = [ "src/rng/rng.cpp", "src/rng_test/rng_test.cpp" ]
+used_include = True   used_generated = True
+```
 
 **Algorithm:**
-- Remove any prior `extracted/<T>/` and create `src/`.
-- **Sources:** copy each to `src/<origin>/<basename>`; record the relative path.
-- **Headers:** for each header, choose its destination by finding the
-  *longest matching include root* (`longest_root()`):
-  - Try `gen_inc_roots` (build tree) **first** → copy to
-    `generated/<path-relative-to-root>`, set `used_generated`. Checking the build
-    root first is what keeps generated headers out of `include/` despite the
-    in-source build dir.
-  - Else try `src_inc_roots` → copy to `include/<path-relative-to-root>`, set
-    `used_include`.
-  - If no root matches, fall back to `include/<basename>` and warn.
+- Remove any prior `extracted/guess/` and create `src/`.
+- **Sources:** copy each to `src/<origin>/<basename>` and record its
+  output-relative path. `cmake_sources` is that path for each of `app_sources`;
+  each test record gets its own from its own source list.
+- **Headers:** for each header, pick the destination by the *longest matching
+  include root* (`longest_root()`):
+  - try `gen_inc_roots` (build tree) **first** → `generated/<relpath>`, set
+    `used_generated` (`…/build/generated` + `build_info.hpp` →
+    `generated/build_info.hpp`). Checking the build root first is what keeps
+    generated headers out of `include/` despite the in-source build dir.
+  - else try `src_inc_roots` → `include/<relpath>`, set `used_include`
+    (`…/libs/input/include` + `input/input.hpp` → `include/input/input.hpp`).
+  - if no root matches, fall back to `include/<basename>` and warn.
 
-The result is `src/` (flattened, namespaced), `include/` (headers at their
-original relative path), and `generated/` (frozen generated headers).
+The result is `src/` (flattened, namespaced by origin), `include/` (headers at
+their original include-relative path), and `generated/` (frozen generated
+headers).
 
 ---
 
-## Stage 9 — Emit the standalone `CMakeLists.txt`
+## Stage 12 — Emit the standalone `CMakeLists.txt`
 
 **Function:** `write_cmakelists()`
 
 **Purpose:** Produce a self-contained build script that needs nothing from the
 parent project.
 
-**Input:** target name, `cxx_std`, `cmake_sources`, the include-dir flags, and
-the external dependency blocks (`[fetch[e] for e in externals]`).
+**Input:** the target name, `cxx_std`, `cmake_sources`, the `used_include` /
+`used_generated` flags, `fetch`, the union of external names (app + every carried
+test), and the `tests` records.
 
-**Output:** `extracted/<T>/CMakeLists.txt`.
+**Output:** `extracted/guess/CMakeLists.txt`.
+
+```cmake
+cmake_minimum_required(VERSION 3.20)
+project(guess_standalone LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+include(FetchContent)
+FetchContent_Declare(
+  fmt
+  GIT_REPOSITORY https://github.com/fmtlib/fmt.git
+  GIT_TAG        10.2.1
+  GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(fmt)
+
+add_executable(guess
+  src/guess/main.cpp
+  src/input/input.cpp
+  src/rng/rng.cpp
+)
+target_include_directories(guess PRIVATE include generated)
+target_link_libraries(guess PRIVATE fmt::fmt)
+
+enable_testing()
+
+add_executable(input_test
+  src/input/input.cpp
+  src/input_test/input_test.cpp
+)
+target_include_directories(input_test PRIVATE include generated)
+target_link_libraries(input_test PRIVATE fmt::fmt)
+add_test(NAME input_test COMMAND input_test)
+
+add_executable(rng_test
+  src/rng/rng.cpp
+  src/rng_test/rng_test.cpp
+)
+target_include_directories(rng_test PRIVATE include generated)
+add_test(NAME rng_test COMMAND rng_test)
+```
 
 **Algorithm:** Assemble the file textually:
 1. `cmake_minimum_required` + `project(<T>_standalone)` + the captured C++
    standard.
-2. If there are externals: emit `include(FetchContent)`, then each captured
-   `FetchContent_Declare(...)` block *verbatim*, then a single
+2. If there are externals: `include(FetchContent)`, then each captured
+   `FetchContent_Declare(...)` block *verbatim*, then one
    `FetchContent_MakeAvailable(<names>)`. The name set is the union of the app's
-   externals and every carried-over test's, since a test may use a dependency
-   the application does not.
-3. `add_executable(<T> …)` listing every collected source, then
+   externals and every carried-over test's, since a test may use a dependency the
+   app does not.
+3. `add_executable(<T> …)` over `cmake_sources`, then
    `target_include_directories(<T> PRIVATE include generated)` — only the dirs
-   that actually received files — then
-   `target_link_libraries(<T> PRIVATE <alias …>)` linking each external via its
-   `<name>::<name>` alias.
+   that actually received files — then `target_link_libraries(<T> PRIVATE …)`
+   linking each external via its `<name>::<name>` alias.
 4. If tests were carried over: `enable_testing()`, then for each test the same
-   executable triple (its own source list and its *own* externals — `rng_test`
-   gets no `target_link_libraries` because it never used `fmt`), followed by
-   `add_test(NAME <registered name> COMMAND <target>)`. The registered CTest
-   name is preserved even where it differs from the target name.
+   executable triple with *its own* source list and *its own* externals, followed
+   by `add_test(NAME <registered name> COMMAND <target>)`.
+
+**Note on per-test externals:** `input_test` gets
+`target_link_libraries(input_test PRIVATE fmt::fmt)` because `input` links `fmt`;
+`rng_test` gets no `target_link_libraries` at all because nothing in its closure
+reaches `fmt`. The registered CTest name is preserved even where it differs from
+the target name.
 
 ---
 
-## Stage 10 — Emit the README
+## Stage 13 — Emit the README
 
 **Function:** `write_readme()`
 
-**Purpose:** Leave a short human description of what the extracted tree is.
+**Purpose:** Leave a short human description of what the extracted tree is and how
+to build it.
 
-**Input:** target name, the first-party target list, the external names.
+**Input:** the target name, the `first_party` list, the external names, the
+`tests` records.
 
-**Output:** `extracted/<T>/README.md` listing the folded-in first-party targets,
-the FetchContent third-party deps, and build instructions.
+**Output:** `extracted/guess/README.md`.
+
+~~~markdown
+# guess (extracted standalone closure)
+
+Minimal build closure for `guess`, extracted from the parent CMake project into a flat, standalone tree.
+
+- First-party targets folded in: guess, input, rng
+- Third-party deps (via FetchContent): fmt
+- Tests carried over: input_test, rng_test
+
+## Build
+
+```sh
+cmake -S . -B build
+cmake --build build -j
+```
+
+## Test
+
+```sh
+ctest --test-dir build
+```
+~~~
 
 ---
 
-## Stage 11 — Verify (optional, `--verify`)
+## Stage 14 — Verify by building and testing (`--verify` only)
 
 **Function:** `verify_build()`
 
-**Purpose:** Prove the extracted tree really is standalone and buildable.
+**Purpose:** Prove the extracted tree really is standalone and buildable — and,
+when tests came along, that it still behaves.
 
 **Input:** the output directory.
 
-**Output:** a configured+built `extracted/<T>/build/`, or a non-zero exit on
-failure.
+**Output:** a configured + built `extracted/guess/build/` with `ctest` green, or a
+non-zero exit on the first failure.
 
-**Algorithm:** Run `cmake -S <out> -B <out>/build` then
-`cmake --build <out>/build -j`. Any failure raises (via `check=True`), so a
-successful run is a hard guarantee that the closure is complete and compiles.
+```
+--- verifying build of extracted 'guess' ---
+--- OK: …/extracted/guess/build built and tested successfully ---
+```
 
-When tests were carried over (Stage 4b), also run `ctest --output-on-failure` in
-that build dir. This raises the guarantee from *the closure compiles standalone*
-to *the closure passes its own tests standalone* — which is the stronger claim,
-since compiling proves only that the headers resolved, not that the code that
-came along still behaves.
+**Algorithm:** Run `cmake -S <out> -B <out>/build`, then
+`cmake --build <out>/build -j`, then — when Stage 7 carried tests over —
+`ctest --output-on-failure` in that build dir. Every step is `check=True`, so a
+clean run is a hard guarantee.
+
+Building alone proves the header closure resolved. Running the tests raises the
+claim from *the closure compiles standalone* to *the closure passes its own tests
+standalone* — the stronger statement, since compiling never exercises the code
+that came along for the ride.
 
 ---
 
 ## Why the output is both minimal and standalone
 
 - **Minimal** — sources come only from the transitively-linked first-party
-  targets (Stage 3/6), and headers come only from what the compiler recorded as
-  actually included (Stage 7). Unused files never enter the tree. Different apps
-  therefore yield different closures (`roller` has no `input`; `greeter` has no
+  targets (Stages 5, 9), and headers come only from what the compiler recorded as
+  actually included (Stage 10). Unused files never enter the tree, so different
+  apps yield different closures (`roller` has no `input`; `greeter` has no
   `rng`). `--with-tests` does not weaken this: a test is carried over only when
-  the code it links is already present (Stage 4b), so the set of libraries in the
+  the code it links is already present (Stage 7), so the set of libraries in the
   tree is identical with or without the flag.
 - **Standalone** — first-party code is copied with its include structure intact
-  (Stage 8), generated code is frozen in place (Stage 7/8), and third-party code
-  is reproduced through the project's own FetchContent declarations (Stage 4/9).
-  Nothing points back at the parent repo. When a target has no third-party
-  dependency at all (`tally`), Stage 9 emits neither the FetchContent section nor
-  any `target_link_libraries`, and the extracted tree then configures and builds
-  with no network access whatsoever.
+  (Stage 11), generated code is frozen in place (Stages 10, 11), and third-party
+  code is reproduced through the project's own FetchContent declarations
+  (Stages 3, 4, 12). Nothing points back at the parent repo. When a target has no
+  third-party dependency at all (`tally`), Stage 12 emits neither the FetchContent
+  section nor any `target_link_libraries`, and the extracted tree then configures
+  and builds with no network access whatsoever.
