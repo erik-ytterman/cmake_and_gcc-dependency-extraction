@@ -67,7 +67,7 @@ compiler.
 | 1  | `load_codemodel()`        | the build dir | the File API codemodel JSON |
 | 2  | `load_targets()`          | the codemodel | per-target JSON + lookup maps |
 | 3  | `parse_fetchcontent()`    | top `CMakeLists.txt` | the `FetchContent_Declare` blocks |
-| 4  | `external_regions()`      | the directory graph | third-party dirs → owning dep |
+| 4  | `external_regions()`      | the directory tree | third-party dirs → owning dep |
 | 5  | `transitive_closure()`    | the root target id | every target id it links |
 | 6  | `classify()`              | that closure | first-party targets vs external names |
 | 7  | `ctest_registry()` + `select_tests()` | the CTest registry | the covering tests to carry over |
@@ -251,7 +251,7 @@ build directory*, so `build/_deps/fmt-src/include/fmt/core.h` is "under
 containment test alone cannot separate the two, and treating `_deps/` as
 generated code would freeze a partial snapshot of `fmt` into `generated/` — where
 it would then *shadow* the pinned version the emitted `FetchContent` block
-fetches. The directory graph is the authority that avoids this.
+fetches. The directory tree is the authority that avoids this.
 
 ---
 

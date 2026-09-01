@@ -237,67 +237,176 @@ the index** — never glob for `target-greeter-*.json` in production code.
 
 ### What the codemodel gives you
 
-The codemodel lists configurations; each has `targets[]` and `directories[]`,
-with per-target detail in its own file. Here is the real `greeter` target:
+The top-level codemodel lists the build's **configurations** — just one here,
+since Makefiles is a single-config generator. Each configuration carries a
+`targets[]` array and a `directories[]` array, and every target additionally has
+its own detail file (named by `jsonFile`). Here is the real `greeter` detail,
+trimmed to the fields that drive an extraction:
 
 ```json
 {
   "name": "greeter",
   "id": "greeter::@31045165d3807a4b136c",
   "type": "EXECUTABLE",
-  "paths": { "build": "apps/greeter", "source": "apps/greeter" },
+  "paths": { "source": "apps/greeter", "build": "apps/greeter" },
+  "nameOnDisk": "greeter",
+  "artifacts": [ { "path": "apps/greeter/greeter" } ],
+
   "dependencies": [
     { "id": "fmt::@976f4f0bee90b99ecdb6" },
     { "id": "input::@6d945ddea8f4ec024c33" }
   ],
+  "linkLibraries": [
+    { "id": "input::@6d945ddea8f4ec024c33" },
+    { "id": "fmt::@976f4f0bee90b99ecdb6" },
+    { "id": "build_info::@6890427a1f51a3e7e1df" }
+  ],
+  "link": {
+    "language": "CXX",
+    "commandFragments": [
+      { "fragment": "-MMD", "role": "flags" },
+      { "fragment": "../../libs/input/libinput.a",     "role": "libraries" },
+      { "fragment": "../../_deps/fmt-build/libfmt.a",  "role": "libraries" }
+    ]
+  },
+
   "sources": [
-    { "path": "apps/greeter/src/main.cpp", "compileGroupIndex": 0 }
+    { "path": "apps/greeter/src/main.cpp",
+      "compileGroupIndex": 0, "sourceGroupIndex": 0 }
+  ],
+  "compileGroups": [
+    {
+      "language": "CXX",
+      "sourceIndexes": [ 0 ],
+      "compileCommandFragments": [ { "fragment": "-MMD -std=gnu++17" } ],
+      "languageStandard": { "standard": "17" },
+      "includes": [
+        { "path": ".../libs/input/include" },
+        { "path": ".../build/_deps/fmt-src/include" },
+        { "path": ".../build/generated" }
+      ]
+    }
   ]
 }
 ```
 
-Four things to notice, because each one matters later:
+Read it against the six things the File API is the authority for:
 
-- **`dependencies[].id`** are opaque ids, not names. Walk the graph by id; use
-  names only for display. Extracting a closure is a depth-first walk over these
-  edges — about ten lines of code (`transitive_closure()`).
-- **`sources[].compileGroupIndex`** is `null` for files that are listed but not
-  compiled — a header added to `add_executable()`, say. Filter on it, or you will
-  try to compile a `.hpp`.
-- **`paths.source`** is the *directory* that defined the target. This turns out
-  to be the key to identifying third-party code (Lab 3).
-- **`compileGroups[].includes[]`** (not shown) gives the real `-I` list. You need
-  it to place a copied header at the same include-relative path, so that
-  `#include "input/input.hpp"` still resolves without editing any source.
+**Targets.** `name` is the human handle; `id` (`greeter::@<hash>`) is the stable
+key every edge refers to — join on `id`, never on `name`, because a `name` may be
+an alias (`fmt::fmt`) and the edges never use names anyway. `type` is one of
+`EXECUTABLE`, `STATIC_LIBRARY`, `SHARED_LIBRARY`, `MODULE_LIBRARY`,
+`OBJECT_LIBRARY`, `INTERFACE_LIBRARY`, or `UTILITY`; the extractor copies sources
+only for the buildable kinds. `paths.source` is the directory that *defined* the
+target — the hook Lab 3 uses to separate first-party from third-party — and
+`artifacts[].path` / `nameOnDisk` name what it produces, which is how a CTest
+command is matched back to its target (§6). Under a recent CMake the
+`INTERFACE` and imported targets (`build_info`, and `fmt`'s header-only variant)
+are listed in a sibling `abstractTargets[]` array rather than in `targets[]`;
+either way they are missing from `dependencies[]` — the next point.
 
-### The directory graph
+**Link edges.** Three arrays describe "what does this link", and they differ:
 
-`configurations[0].directories[]` is the piece most people miss. It is the
-subdirectory tree, with `source`, `build`, `parentIndex`, `childIndexes`, and
-`targetIndexes`:
+- `dependencies[]` — the **build-ordering** graph, ids only. This is what
+  `transitive_closure()` walks: from `greeter`, follow every `id`, and you have
+  the target closure in about ten lines. It lists only targets that *build
+  something*, so `INTERFACE` libraries like `build_info` are absent — Trap 2.
+- `linkLibraries[]` — the resolved link interface, `INTERFACE` libraries
+  included (`build_info` appears here where `dependencies[]` omits it). Newer
+  codemodels only; older ones expose just `dependencies[]` and `link`.
+- `link.commandFragments[]` — the literal linker arguments, each tagged with a
+  `role` (`flags`, `libraries`, `libraryPath`, `frameworkPath`). The `libraries`
+  fragments are real artifact paths (`../../_deps/fmt-build/libfmt.a`) — the
+  ground truth §12's optional lab cross-checks against.
+
+The extractor deliberately walks the narrow `dependencies[]` and lets the
+depfiles recover what it misses; "two sources covering each other's blind spots"
+is the whole Trap 2 lesson.
+
+**Sources.** `sources[]` is every file attached to the target. `path` is relative
+to the top-level source dir (or absolute — see the note below).
+`compileGroupIndex` points into `compileGroups[]` and is **`null`** for a file
+that is listed but not compiled — a header dropped into `add_executable()`, a
+data file in a `source_group()`. `collect_sources()` filters on exactly that
+(plus a real C/C++ extension) so it never hands a `.hpp` to the compiler.
+`sourceGroupIndex` is just the IDE folder ("Source Files") and is irrelevant
+here.
+
+**Include dirs.** `compileGroups[].includes[].path` is the fully-resolved `-I`
+list for that group — **absolute paths, in search order**, after CMake expanded
+every `target_include_directories`, generator expression and transitive usage
+requirement. The extractor needs it to re-file each copied header at the same
+include-relative path, so `#include "input/input.hpp"` keeps resolving with no
+edit to any source. An entry may also carry `"isSystem": true` (a `-isystem`
+path); those are the headers a compiler omits from a `-MMD` depfile, which is
+precisely why "is it in the depfile?" cannot be the third-party test (§5).
+
+**Language standard.** `compileGroups[].languageStandard.standard` is `"17"` here
+— digits only, matching CMake's `CXX_STANDARD`. `language` is `"CXX"`, and
+`compileCommandFragments[]` shows what actually reached the compiler
+(`-std=gnu++17` — `gnu++`, not `c++`, because `CXX_EXTENSIONS` defaults on). The
+extractor copies the number straight into the generated
+`set(CMAKE_CXX_STANDARD 17)`; if targets in the closure disagree, the last one
+processed wins (a production tool would take the max).
+
+**Directory tree.** `configurations[0].directories[]` — the next subsection.
+
+### The directory tree
+
+`configurations[0].directories[]` is the part most people miss, and Lab 3 is
+built on it. It is the `add_subdirectory()` tree — one entry per directory, with
+`source`, `build`, `parentIndex`, `childIndexes`, `targetIndexes` and
+`projectIndex`:
 
 ```sh
 python3 -c "
-import json,glob
-cm=json.load(open(sorted(glob.glob('build/.cmake/api/v1/reply/codemodel-v2-*.json'))[-1]))
-for i,d in enumerate(cm['configurations'][0]['directories']):
-    print(i, d['source'], '->', d['build'], 'parent=', d.get('parentIndex'))
+import json, glob
+cm = json.load(open(sorted(glob.glob('build/.cmake/api/v1/reply/codemodel-v2-*.json'))[-1]))
+for i, d in enumerate(cm['configurations'][0]['directories']):
+    tix = d.get('targetIndexes', [])
+    tix = f'{len(tix)} targets' if len(tix) > 4 else tix
+    print(f\"{i}  {d['source']:<22} -> {d['build']:<18} parent={d.get('parentIndex')}  {tix}\")
 "
 ```
 
 ```
-0 . -> . parent= None
-1 build/_deps/fmt-src -> _deps/fmt-build parent= 0
-2 libs/rng -> libs/rng parent= 0
-...
+0  .                      -> .                  parent=None  28 targets
+1  build/_deps/fmt-src    -> _deps/fmt-build    parent=0  [28]
+2  libs/rng               -> libs/rng           parent=0  [33, 34]
+3  libs/input             -> libs/input         parent=0  [31, 32]
+4  apps/guess             -> apps/guess         parent=0  [30]
+5  apps/roller            -> apps/roller        parent=0  [35]
+6  apps/greeter           -> apps/greeter       parent=0  [29]
+7  apps/tally             -> apps/tally         parent=0  [36]
 ```
 
-Look at directory 1. **`fmt`'s source directory is inside the build
-directory.** Hold that thought — it is Trap 1.
+Each entry has:
+
+- **`source`, `build`** — the directory on each side, relative to the top (or
+  absolute). These two *diverge* for FetchContent: directory 1's source is
+  `build/_deps/fmt-src` — under the **build** tree — while its build side is
+  `_deps/fmt-build`. Hold that: it is Trap 1.
+- **`parentIndex`, `childIndexes`** — the tree links. A missing `parentIndex`
+  marks a top-level directory; `external_regions()` uses that so a name collision
+  at the root can never mark the whole project third-party.
+- **`targetIndexes`** — which entries of `configurations[0].targets[]` this
+  directory defined (index 28 → `fmt`, 33/34 → `rng`/`rng_test`, …).
+  `external_regions()` inverts the relation: once a directory is known
+  third-party, every target it defined is third-party too.
+- **`projectIndex`, `minimumCMakeVersion`** — which `project()` owns the
+  directory (here `guessing_poc` vs the nested `FMT`) and the
+  `cmake_minimum_required` in force. Useful for diagnostics; unused by the
+  extractor.
+
+The `_deps/fmt-src` line is the entire reason Lab 3 exists: FetchContent's source
+directory lands *inside the build tree*, so no "is it under `build/`?" test can
+tell a dependency's headers from genuinely generated ones. The directory tree,
+which records *who declared what*, can.
 
 > **Note on paths.** File API paths are relative to the top-level source or build
-> dir when they are underneath it, and absolute otherwise. `Path(top) / p` handles
-> both, because Python returns the right-hand operand when it is absolute.
+> dir when they sit underneath it, and absolute otherwise. `Path(top) / p`
+> handles both, because Python returns the right-hand operand when it is
+> absolute.
 
 ---
 
@@ -396,7 +505,7 @@ a path heuristic, because `_deps/` is a default that projects override, and it
 must not be a name check, because a dependency's target names need not match its
 declared name (`googletest` → `gtest`, `gmock`).
 
-The extractor uses the directory graph from Lab 1 (`external_regions()`), marking
+The extractor uses the directory tree from Lab 1 (`external_regions()`), marking
 a directory third-party on either signal:
 
 1. it defines a target named after a `FetchContent_Declare`, or
@@ -450,7 +559,7 @@ it, and a test target can be named anything at all.
 ```
    codemodel ──▶ which targets, which sources, which include roots
    depfiles  ──▶ which headers, exactly
-   directory graph + FetchContent ──▶ where the third-party boundary is
+   directory tree + FetchContent ──▶ where the third-party boundary is
    ctest json ──▶ which tests cover the extracted code
                               │
                               ▼
@@ -514,7 +623,7 @@ extracted app compiled against the stale copy instead of the pinned 10.2.1 it
 fetched. It built fine. It was still wrong, and would diverge the moment the tag
 moved.
 
-**Fix:** no containment test can separate the two. Use the directory graph
+**Fix:** no containment test can separate the two. Use the directory tree
 (Lab 3).
 
 ### Trap 2 — INTERFACE libraries are missing from `dependencies[]`
@@ -676,7 +785,7 @@ order:
 | Section printed | What it does |
 |---|---|
 | `§2  cmake --graphviz` | Emits `build/deps.dot` — the lossy approach from §2 |
-| `Lab 1  …` | File API query, index reader, the `greeter` target, the directory graph (§4) |
+| `Lab 1  …` | File API query, index reader, the `greeter` target, the directory tree (§4) |
 | `Lab 2  …` | Rebuilds with `-MMD`, prints the `greeter` depfile and its plain-`-I` include flags (§5) |
 | `Lab 3  …` | The `FetchContent_Declare` block and the `ctest --show-only=json-v1` reply (§6) |
 | `§7  extract …` | Extracts `greeter` and `tally` with `--verify`, printing each generated `CMakeLists.txt` |
