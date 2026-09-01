@@ -20,7 +20,7 @@ Work through this with a terminal open. Every command below is real, and every
 output shown is actual output from this project. If you would rather watch the
 whole tutorial run start to finish before reading it, skip to
 [section 11](#11-running-every-lab-at-once) — `tools/test_tutorial.sh` executes
-every lab in order.
+the core labs (§2–§9) in order. Section 12 is an optional add-on.
 
 ---
 
@@ -658,12 +658,13 @@ A checklist, roughly in order of how often each one bites:
 
 ## 11. Running every lab at once
 
-Everything in this tutorial is executable, and
+Everything in this tutorial through §9 is executable, and
 [`tools/test_tutorial.sh`](tools/test_tutorial.sh) runs all of it end to end.
 It is the tutorial as a script: the same commands, in the same order, against
 this repo. Use it two ways — as a smoke test that the pipeline still works on
 your machine, and as a way to see every lab's real output scroll past before you
-read the prose behind it.
+read the prose behind it. (Section 12 is the exception — an optional lab that
+needs CMake ≥ 4.0 and is deliberately left out of the script.)
 
 ```sh
 bash tools/test_tutorial.sh
@@ -695,6 +696,118 @@ freely afterward.
 
 ---
 
+## 12. Optional lab — the CMake 4.0 link-step depfile
+
+> **Optional, and not in `tools/test_tutorial.sh`.** This lab needs CMake ≥ 4.0
+> and illustrates a *diagnostic idea*, not baseline behavior. The extractor does
+> not use `link.d` today — Stage 7 only takes care to skip it (Trap 5). Read
+> this if you are porting the pipeline to a project with dependencies that are
+> not FetchContent.
+
+### What `link.d` is
+
+Trap 5 introduced it as a hazard: from CMake 4.0, the Makefile and Ninja
+generators write a **link-step depfile** `link.d` next to each executable's
+per-TU depfiles, and a `*.d` glob will scoop it into the header closure by
+mistake. But turned around, `link.d` is a fourth build-produced fact — the
+**exact list of inputs the linker consumed** to produce the binary. Nothing
+derives it; the linker recorded it.
+
+You do not ask for it — CMake 4.0+ emits it automatically. Rebuild and look:
+
+```sh
+cmake --version            # need >= 4.0 for this lab
+cmake -S . -B build
+cmake --build build -j
+cat build/apps/greeter/CMakeFiles/greeter.dir/link.d
+```
+
+```make
+greeter: \
+  /usr/lib/gcc/x86_64-linux-gnu/15/../../../x86_64-linux-gnu/Scrt1.o \
+  CMakeFiles/greeter.dir/src/main.cpp.o \
+  ../../libs/input/libinput.a \
+  ../../_deps/fmt-build/libfmt.a \
+  /usr/lib/gcc/x86_64-linux-gnu/15/libstdc++.so \
+  /usr/lib/x86_64-linux-gnu/libm.so.6 \
+  ... (crt objects, libc, libgcc, ld.so)
+
+CMakeFiles/greeter.dir/src/main.cpp.o:
+
+../../libs/input/libinput.a:
+...
+```
+
+Same Make shape as a compiler depfile: one rule whose prerequisites are the
+link inputs, then (like `-MP`) an empty rule per prerequisite. Paths are
+relative to the **target's** build dir — `build/apps/greeter` — not to the
+`.dir/` the file sits in.
+
+### The idea: a ground-truth check on everything that is not a header
+
+The codemodel (Lab 1) tells you which targets *should* link. `link.d` tells you
+what *did*. Comparing the two catches the blind spots that a pure target-graph
+walk has — `OBJECT` libraries, generated sources, and above all **external
+libraries that are not FetchContent**, which the extractor's Stage 4 boundary
+does not see at all.
+
+Filter the toolchain noise with the compiler's own search dirs, and classify
+what remains:
+
+```sh
+python3 -c "
+import pathlib, subprocess
+out = subprocess.run(['gcc','-print-search-dirs'], capture_output=True, text=True).stdout
+libline = next(l for l in out.splitlines() if l.startswith('libraries: '))
+tool_dirs = [pathlib.Path(p).resolve() for p in libline.split('=',1)[1].split(':') if p]
+
+d = pathlib.Path('build/apps/greeter/CMakeFiles/greeter.dir/link.d')
+base = d.parent.parent.parent                       # build/apps/greeter
+head = d.read_text().replace('\\\\\n',' ').split('\n\n',1)[0]
+prereqs = [pathlib.Path(p) for p in head.split(':',1)[1].split()]
+
+top = pathlib.Path.cwd()
+for p in sorted({(base / q).resolve() for q in prereqs}):
+    if any(t in p.parents for t in tool_dirs):
+        continue                                    # provided by the toolchain
+    kind = ('_deps -> must be a FetchContent dep' if '/_deps/' in str(p)
+            else 'first-party (extractor copies / compiles it)')
+    print(f'  {p.relative_to(top)}\n      {kind}')
+"
+```
+
+```
+  build/_deps/fmt-build/libfmt.a
+      _deps -> must be a FetchContent dep
+  build/apps/greeter/CMakeFiles/greeter.dir/src/main.cpp.o
+      first-party (extractor copies / compiles it)
+  build/libs/input/libinput.a
+      first-party (extractor copies / compiles it)
+```
+
+Three inputs, all accounted for: one object from a first-party source, one
+first-party archive, one archive under `_deps/` that the emitted
+`FetchContent_Declare(fmt ...)` reproduces. **Nothing is left over.**
+
+Now imagine `greeter` had called `find_package(SQLite3)` and linked
+`SQLite::SQLite3`. It would appear here as `/usr/lib/.../libsqlite3.so` — outside
+every toolchain dir, not under `_deps/`, not a first-party path. That leftover is
+the signal: a dependency the FetchContent-only Stage 4 silently drops, so the
+extracted `CMakeLists.txt` would omit the link and fail to build standalone. The
+check turns a confusing downstream link error into a one-line warning at extract
+time — which is exactly the "check your dependency boundary" item from §10, and
+the "*nothing else*" promise from §1 applied in the other direction.
+
+### Why it stays out of the baseline
+
+Two reasons. It needs CMake ≥ 4.0, while the project floor is 3.20 (§4) and
+`test_tutorial.sh` must pass on both. And it is a *diagnostic*, not a pipeline
+stage: `extract_closure.py` would use `link.d` only to emit warnings, never to
+decide what to copy — the three sources of truth in §3 already do that. Wiring it
+in as an optional Stage 3b is left as an exercise.
+
+---
+
 ## Reference: what each API gives you
 
 | Tool / API | Invocation | Gives you | Since |
@@ -703,4 +816,5 @@ freely afterward.
 | Compiler depfiles | `-MMD` (GCC/Clang) | Exact per-TU header closure, post-preprocessor | — |
 | CTest introspection | `ctest --show-only=json-v1` | Registered tests, their commands and properties | CMake 3.14 |
 | Compile database | `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` | Per-TU command lines — useful cross-check | CMake 3.5 |
+| Link-step depfile | `link.d` beside the object files (automatic) | Exact linker input list — objects, archives, libraries (§12) | CMake 4.0 |
 | Target graph image | `cmake --graphviz=out.dot` | Human-readable graph; too lossy to build on | — |
