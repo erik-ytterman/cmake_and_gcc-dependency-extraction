@@ -19,8 +19,9 @@ query them, and the five traps that make a naive implementation quietly wrong.
 Work through this with a terminal open. Every command below is real, and every
 output shown is actual output from this project. If you would rather watch the
 whole tutorial run start to finish before reading it, skip to
-[section 11](#11-running-every-lab-at-once) — `tools/test_tutorial.sh` executes
-the core labs (§2–§9) in order. Section 12 is an optional add-on.
+[section 12](#12-running-every-lab-at-once) — `tools/test_tutorial.sh` executes
+the core labs (§2–§9) in order. Sections 11 and 13 are add-ons: a porting guide
+for large repos, and an optional lab.
 
 ---
 
@@ -50,7 +51,7 @@ Extraction is graph work, so the standard terms are used precisely.
 |---|---|
 | **Preprocessor** | The first pass the compiler runs: it executes `#include` (pasting the named file in as text), `#define`, and `#if`. Its output — one source with every header spliced in — is the translation unit. |
 | **Object file** (`.o`) | The compiled form of one translation unit: machine code with unresolved references to things defined elsewhere. |
-| **Compiler / linker** | The compiler turns one source into one object file. The **linker** then combines object files and libraries into an executable, resolving those cross-references. `-MMD` is a compiler flag; `link.d` (§12) is a linker artifact. |
+| **Compiler / linker** | The compiler turns one source into one object file. The **linker** then combines object files and libraries into an executable, resolving those cross-references. `-MMD` is a compiler flag; `link.d` (§13) is a linker artifact. |
 | **Archive / static library** (`.a`) | A collection of object files in one file. Linking against it copies in only the objects the executable actually references; nothing stays to resolve at run time. |
 
 ### CMake
@@ -395,7 +396,7 @@ either way they are missing from `dependencies[]` — the next point.
 - `link.commandFragments[]` — the literal linker arguments, each tagged with a
   `role` (`flags`, `libraries`, `libraryPath`, `frameworkPath`). The `libraries`
   fragments are real artifact paths (`../../_deps/fmt-build/libfmt.a`) — the
-  ground truth §12's optional lab cross-checks against.
+  ground truth §13's optional lab cross-checks against.
 
 The extractor deliberately walks the narrow `dependencies[]` and lets the
 depfiles recover what it misses; "two sources covering each other's blind spots"
@@ -820,23 +821,24 @@ pin it to the shape you actually mean.
 
 ---
 
-## 10. Porting this to your own project
+## 10. Porting this to your own project — a checklist
 
-A checklist, roughly in order of how often each one bites:
+The short version, roughly in order of how often each one bites; §11 is the
+long version for a large multi-target repo.
 
 - [ ] **Turn on depfiles.** `-MMD` for GCC/Clang. MSVC has no direct equivalent;
       use `/showIncludes` and parse its output, or drive the closure from
       `compile_commands.json` plus a preprocessor pass.
-- [ ] **Check your dependency boundary.** `find_package`, `vcpkg`, `conan`, and
-      git submodules all need a different Stage 4 than FetchContent. The concept
-      holds; the parser changes.
+- [ ] **Check your dependency boundary.** `FetchContent_Declare` blocks outside
+      the top `CMakeLists.txt` are found if the file is `include()`d or named
+      with `--deps-file`. `find_package`, `vcpkg`, `conan` and git submodules
+      need a different Stage 4 — the concept holds, the parser changes (§11, §13).
 - [ ] **Handle multi-config generators.** This POC reads
       `configurations[0]`. Ninja Multi-Config and Visual Studio have several —
       pick deliberately, or extract per configuration.
-- [ ] **Watch for basename collisions.** Sources are flattened to
-      `src/<origin>/<basename>`. A target with `a/util.cpp` and `b/util.cpp`
-      would have one silently overwrite the other. Add a collision check before
-      you trust it on a big tree.
+- [ ] **Basename collisions abort by default.** Sources flatten to
+      `src/<origin>/<basename>`; two sources of one target with the same
+      basename now stop the run (pass `--allow-collisions` to keep the last).
 - [ ] **Decide about generated code.** This POC freezes generated headers as
       plain files. If yours embeds a version or a build stamp that must stay
       live, copy the `.in` template and the `configure_file()` call instead.
@@ -847,15 +849,119 @@ A checklist, roughly in order of how often each one bites:
 
 ---
 
-## 11. Running every lab at once
+## 11. Porting guide: a large multi-target monorepo
+
+The sample project is deliberately tiny. A real one has a dozen top-level
+executables, a first-party library tree several `add_subdirectory()` levels
+deep, and a handful of external dependencies fetched by CMake. This section is
+what changes — and, mostly, what does not — at that size.
+
+### The pipeline is per-target, and most of it already scales
+
+You extract **one executable at a time**: `extract_closure.py <exe>` produces the
+minimal tree for that one binary. There is no "extract the whole repo" mode, and
+you rarely want one — the point is that each executable's tree is smaller than
+the repo.
+
+Two parts scale for free:
+
+- **Tree depth.** `transitive_closure()` (Stage 5) is a graph walk; it does not
+  care whether a library is linked directly or ten `add_subdirectory()` levels
+  down. A 200-node closure costs the same code as a 3-node one.
+- **Dependencies that nest.** `external_regions()` (Stage 4) propagates ownership
+  to child directories, so a fetched dependency that itself calls
+  `add_subdirectory()` (or pulls its *own* FetchContent deps) is covered — every
+  directory under it is marked third-party and nothing inside is copied.
+
+So the failure modes below are about *breadth* and *conventions*, not depth.
+
+### Many executables over a shared library tree
+
+Extract each executable separately; each tree contains only the libraries that
+executable links. Two binaries that share 80% of the library tree still produce
+two correct minimal trees — the `guess` / `roller` / `greeter` / `tally` split
+is that same effect in miniature.
+
+If you genuinely need *one* tree for several executables (a combined sample, a
+shared fuzz target), the tool does not build it, but the recipe is short: run it
+per executable, then union the results — the set of `src/` files, the set of
+`include/` and `generated/` files, the set of externals — and emit one
+`CMakeLists.txt` with one `add_executable()` per binary. Because every
+per-executable tree is already flat and namespaced by origin, the union is a
+merge with no path conflicts (basename collisions aside — see below).
+
+### Several FetchContent dependencies
+
+`gather_fetchcontent()` (Stage 3) scans the top `CMakeLists.txt` **and every
+file it transitively `include()`s**. A repo that keeps its dependencies in
+`cmake/Dependencies.cmake` and does `include(cmake/Dependencies)` is handled with
+no arguments. For anything the `include()` chain misses — a declaration inside a
+subdirectory's `CMakeLists.txt`, or a file pulled in by a macro — point at it:
+
+```sh
+python3 tools/extract_closure.py app \
+    --deps-file 'cmake/*.cmake' --deps-file 'third_party/*/declare.cmake'
+```
+
+Globs are relative to `--src` and repeatable. Over-collecting is safe: a
+declaration whose name never lands in `app`'s closure is never emitted.
+
+What still needs a human:
+
+- **A dependency pulled in transitively by another dependency.** Its
+  `FetchContent_Declare` lives in *that* dependency's source, which the extractor
+  does not scan. If `app`'s closure links it directly, add its declaration by
+  hand (or `--deps-file` the fetched file once it exists).
+- **`FETCHCONTENT_SOURCE_DIR_<NAME>` overrides / `FetchContent_Declare(... OVERRIDE_FIND_PACKAGE)`.**
+  The block is copied verbatim, so a local-path override travels with it and
+  will not resolve elsewhere. Strip those before shipping.
+- **The link alias.** The emitted `target_link_libraries` uses the convention
+  `<name>::<name>`. Where a dependency's real alias differs (`GTest::gtest`,
+  `Boost::headers`), fix it by hand — the codemodel's `linkLibraries[]` (§4)
+  resolves to the target whose `name` is the alias to use.
+
+### Non-FetchContent externals
+
+A big repo usually also has `find_package()`, vcpkg, Conan, or vendored
+submodules. Stage 4 only understands FetchContent, so an executable that links
+`SQLite::SQLite3` gets a tree whose `CMakeLists.txt` omits that link and fails to
+build. The **§13 optional lab** turns the CMake 4.0 `link.d` into a check that
+catches exactly this — a linker input that is neither toolchain, nor `_deps/`,
+nor first-party is a dependency the boundary missed. Run that check before you
+trust an extracted tree from a repo with mixed dependency mechanisms.
+
+### Sharp edges at scale, and where each one bites
+
+| At scale you hit | Where it bites | Minimal fix |
+|---|---|---|
+| **Basename collisions** — `foo/util.cpp` and `bar/util.cpp` in one target | Stage 11 aborts with both paths | rename one, or `--allow-collisions` to keep the last |
+| **Multi-config generator** (Ninja Multi-Config, VS) | `load_targets()` reads `configurations[0]` only | extract once per configuration, or hard-code the index you ship |
+| **`OBJECT` libraries** | absent from `link.commandFragments` as archives; their sources attach to the consuming target | usually fine — the sources are already in the closure; verify with `--verify` |
+| **Generator expressions in include dirs** | the codemodel gives the *resolved* path, so this is fine — but a `$<BUILD_INTERFACE>` path under the build tree lands in `generated/` | check `generated/` after extraction; move genuinely-source headers if misfiled |
+| **Per-config compile groups** | Stage 8 takes the *last* `languageStandard` it sees | if targets disagree, set `CMAKE_CXX_STANDARD` in the emitted file by hand to the max |
+| **Install rules / exported targets** | ignored — the extracted tree has none | add them back only if the extracted tree is itself meant to be installed |
+
+### A workflow
+
+1. Configure the real build once, with `-MMD` (or your compiler's equivalent).
+2. `python3 tools/extract_closure.py <exe> --with-tests --verify` per executable.
+3. Read stderr. The tool tells you what it skipped and why (`note: skipping
+   test …`), and warns on headers with no include root and on collisions.
+4. If the repo has non-FetchContent externals, run the §13 `link.d` check.
+5. Fix the two or three things it flagged, re-run, and let `--verify` (with
+   `--with-tests`) be the gate.
+
+---
+
+## 12. Running every lab at once
 
 Everything in this tutorial through §9 is executable, and
 [`tools/test_tutorial.sh`](tools/test_tutorial.sh) runs all of it end to end.
 It is the tutorial as a script: the same commands, in the same order, against
 this repo. Use it two ways — as a smoke test that the pipeline still works on
 your machine, and as a way to see every lab's real output scroll past before you
-read the prose behind it. (Section 12 is the exception — an optional lab that
-needs CMake ≥ 4.0 and is deliberately left out of the script.)
+read the prose behind it. (Sections 11 and 13 are prose only — a porting guide
+and an optional CMake ≥ 4.0 lab — and are not in the script.)
 
 ```sh
 bash tools/test_tutorial.sh
@@ -887,7 +993,7 @@ freely afterward.
 
 ---
 
-## 12. Optional lab — the CMake 4.0 link-step depfile
+## 13. Optional lab — the CMake 4.0 link-step depfile
 
 > **Optional, and not in `tools/test_tutorial.sh`.** This lab needs CMake ≥ 4.0
 > and illustrates a *diagnostic idea*, not baseline behavior. The extractor does
@@ -1007,5 +1113,5 @@ in as an optional extra pass alongside Stage 4 is left as an exercise.
 | Compiler depfiles | `-MMD` (GCC/Clang) | Exact per-TU header closure, post-preprocessor | — |
 | CTest introspection | `ctest --show-only=json-v1` | Registered tests, their commands and properties | CMake 3.14 |
 | Compile database | `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` | Per-TU command lines — useful cross-check | CMake 3.5 |
-| Link-step depfile | `link.d` beside the object files (automatic) | Exact linker input list — objects, archives, libraries (§12) | CMake 4.0 |
+| Link-step depfile | `link.d` beside the object files (automatic) | Exact linker input list — objects, archives, libraries (§13) | CMake 4.0 |
 | Target graph image | `cmake --graphviz=out.dot` | Human-readable graph; too lossy to build on | — |

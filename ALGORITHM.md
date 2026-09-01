@@ -47,7 +47,7 @@ compiler.
 ```
                         ┌─ Stage 1   load_codemodel ────── CMake File API reply
   build/       ────────▶│  Stage 2   load_targets ──────── by_id / name_to_id / dir_of
-  src/         ────────▶│  Stage 3   parse_fetchcontent ── fetch{}   (from top CMakeLists.txt)
+  src/         ────────▶│  Stage 3   gather_fetchcontent ─ fetch{}   (CMakeLists.txt + include()s)
   -MMD *.o.d   ────────▶│  Stage 4   external_regions ──── regions{}  (third-party dirs)
   CMakeLists.txt ──────▶│  Stage 5   transitive_closure ── closure of target ids
   ctest registry ─────▶ │  Stage 6   classify ──────────── first_party[] / externals[]
@@ -55,7 +55,7 @@ compiler.
                         │  Stage 8   (include roots) ───── src/gen include roots, cxx_std
                         │  Stage 9   collect_sources ───── all_sources
                         │  Stage 10  parse_depfile ─────── headers
-                        │  Stage 11  (layout) ──────────── extracted/<T>/{src,include,generated}
+                        │  Stage 11  collision-check + layout  extracted/<T>/{src,include,generated}
                         │  Stage 12  write_cmakelists ──── extracted/<T>/CMakeLists.txt
                         │  Stage 13  write_readme ──────── extracted/<T>/README.md
                         └─ Stage 14  verify_build * ────── extracted/<T>/build/  (built + green)
@@ -66,7 +66,7 @@ compiler.
 |------:|----------|---------|--------|
 | 1  | `load_codemodel()`        | the build dir | the File API codemodel JSON |
 | 2  | `load_targets()`          | the codemodel | per-target JSON + lookup maps |
-| 3  | `parse_fetchcontent()`    | top `CMakeLists.txt` | the `FetchContent_Declare` blocks |
+| 3  | `gather_fetchcontent()` + `parse_fetchcontent()` | `CMakeLists.txt` + its `include()`s | the `FetchContent_Declare` blocks |
 | 4  | `external_regions()`      | the directory tree | third-party dirs → owning dep |
 | 5  | `transitive_closure()`    | the root target id | every target id it links |
 | 6  | `classify()`              | that closure | first-party targets vs external names |
@@ -160,13 +160,14 @@ a closure.
 
 ## Stage 3 — Parse the FetchContent declarations
 
-**Function:** `parse_fetchcontent()`
+**Function:** `gather_fetchcontent()`, then `parse_fetchcontent()`
 
 **Purpose:** Capture, verbatim, every third-party dependency block so the emitted
 `CMakeLists.txt` can reproduce it exactly — same repo, same pinned tag — instead
 of copying the dependency's code.
 
-**Input:** the text of the top-level `CMakeLists.txt`.
+**Input:** the top-level `CMakeLists.txt`, every file it transitively
+`include()`s, and any `--deps-file` globs.
 
 ```cmake
 FetchContent_Declare(
@@ -190,9 +191,15 @@ FetchContent_MakeAvailable(fmt)
 }
 ```
 
-**Algorithm:** Regex-scan for `FetchContent_Declare(<name> … )` blocks
-(`FetchContent_Declare\s*\(\s*(\w+)(.*?)\n\)`, dotall). Store the whole matched
-block unmodified and a conventional alias `<name>::<name>`.
+**Algorithm:** `gather_fetchcontent()` reads `CMakeLists.txt`, follows each
+`include(<arg>)` it can resolve to a file (a path relative to the including file
+or the source root, or a `cmake/<Module>` name; a still-variable path is
+skipped, not guessed), and also reads any `--deps-file` globs — then concatenates
+the lot. `parse_fetchcontent()` regex-scans that text for `FetchContent_Declare(
+<name> … )` blocks (`FetchContent_Declare\s*\(\s*(\w+)(.*?)\n\)`, dotall) and
+stores each block unmodified plus a conventional alias `<name>::<name>`.
+Over-collecting is harmless: a declaration whose name never lands in the closure
+is never emitted (Stage 12).
 
 **Note:** this runs *before* the closure walk because both Stage 4 (region
 mapping) and Stage 6 (partition) need `fetch` to recognise a dependency.
@@ -563,6 +570,11 @@ used_include = True   used_generated = True
 ```
 
 **Algorithm:**
+- **Collision check (first, before any write):** group `all_sources` by their
+  target destination `src/<origin>/<basename>`. If two different source paths
+  map to one destination, print every clash and `sys.exit` — unless
+  `--allow-collisions`, which downgrades it to a warning and lets the last write
+  win. On the sample nothing collides.
 - Remove any prior `extracted/guess/` and create `src/`.
 - **Sources:** copy each to `src/<origin>/<basename>` and record its
   output-relative path. `cmake_sources` is that path for each of `app_sources`;

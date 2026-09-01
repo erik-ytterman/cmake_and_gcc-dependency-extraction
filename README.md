@@ -75,12 +75,17 @@ How it works — it combines three sources of truth:
 2. **Per-translation-unit `.d` files** (`g++ -MMD`) — for each `.cpp` and
    everything it includes, the precise set of headers actually `#included`, so
    only headers on the real closure are copied.
-3. **Top-level `CMakeLists.txt`** — the `FetchContent_Declare(fmt ...)` block is
-   copied verbatim into the extracted `CMakeLists.txt`, so third-party deps stay
-   as FetchContent (not vendored) and the tree remains standalone yet minimal.
+3. **`CMakeLists.txt` and the `.cmake` files it `include()`s** — every
+   `FetchContent_Declare(...)` block is copied verbatim into the extracted
+   `CMakeLists.txt`, so third-party deps stay as FetchContent (not vendored) and
+   the tree remains standalone yet minimal. `--deps-file <glob>` adds files the
+   `include()` chain misses.
 
 Because the apps touch different library subsets, the extracted trees differ:
 `roller` contains no `input`, `greeter` contains no `rng`.
+
+For a bigger repo — many top-level executables, a deep submodule tree, several
+fetched dependencies — see [TUTORIAL.md §11](TUTORIAL.md).
 
 ### A closure with no third-party dependency
 
