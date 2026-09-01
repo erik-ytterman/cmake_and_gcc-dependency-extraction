@@ -6,7 +6,8 @@ Inputs (all derived from an already-configured build dir):
   * CMake File API codemodel  -> authoritative target graph
   * .d files, one per TU       -> precise header closure actually #included
     (TU = translation unit: one .cpp plus every header it includes)
-  * top-level CMakeLists.txt   -> FetchContent_Declare blocks for third-party deps
+  * CMakeLists.txt + include()d .cmake files (and --deps-file globs)
+                              -> FetchContent_Declare blocks for third-party deps
   * ctest --show-only          -> the registered tests (only with --with-tests)
 
 Output (for target T):
@@ -47,8 +48,9 @@ SOURCE_EXTS = {".c", ".cc", ".cpp", ".cxx"}
 #
 #    1. load_codemodel      -- (re)configure the build, read the File API reply
 #    2. load_targets        -- index every target JSON by id / name / directory
-#    3. parse_fetchcontent  -- lift the FetchContent_Declare blocks from the
-#                              top-level CMakeLists.txt
+#    3. gather_fetchcontent -- collect the CMake text (top CMakeLists.txt, every
+#       + parse_fetchcontent   file it include()s, and any --deps-file globs) and
+#                              lift the FetchContent_Declare blocks out of it
 #    4. external_regions    -- map every third-party directory to its dep
 #                              (region_owner / is_under are its path lookups,
 #                              reused by stages 6, 8 and 10)
@@ -58,7 +60,7 @@ SOURCE_EXTS = {".c", ".cc", ".cpp", ".cxx"}
 #    8. (inline)            -- gather include roots + the C++ standard
 #    9. collect_sources     -- list the source files actually compiled
 #   10. parse_depfile       -- read the per-TU *.o.d depfiles for the header closure
-#   11. (inline, longest_root) -- lay out the flat extracted tree
+#   11. (inline, longest_root) -- collision-check, then lay out the flat tree
 #   12. write_cmakelists    -- emit the standalone CMakeLists.txt
 #   13. write_readme        -- emit the README.md
 #   14. verify_build        -- (--verify) configure + build + ctest the result
@@ -71,7 +73,8 @@ SOURCE_EXTS = {".c", ".cc", ".cpp", ".cxx"}
 # Pipeline driver: runs stages 1..14, each implemented by a function (or an
 # inline block) defined below in the order it is first reached here.
 def extract(target: str, src_root: Path, build_dir: Path, out_root: Path,
-            verify: bool, with_tests: bool) -> None:
+            verify: bool, with_tests: bool, deps_files: list[str] | None = None,
+            allow_collisions: bool = False) -> None:
     reply, cm = load_codemodel(build_dir)
     top_source = Path(cm["paths"]["source"])
     top_build = Path(cm["paths"]["build"])
@@ -81,7 +84,7 @@ def extract(target: str, src_root: Path, build_dir: Path, out_root: Path,
         sys.exit(f"error: target '{target}' not found. "
                  f"available: {', '.join(sorted(name_to_id))}")
 
-    fetch = parse_fetchcontent((src_root / "CMakeLists.txt").read_text())
+    fetch = gather_fetchcontent(src_root, deps_files or [])
     regions = external_regions(cm, by_id, dir_of, fetch, top_source, top_build)
 
     closure = transitive_closure(name_to_id[target], by_id)
@@ -142,6 +145,23 @@ def extract(target: str, src_root: Path, build_dir: Path, out_root: Path,
                     headers.add(pre)
 
     # --- Stage 11: lay out the flat extracted tree ---
+    # src/<origin>/<basename> flattens directories away, so two sources of one
+    # target that share a basename would silently overwrite. Catch that before
+    # touching the filesystem; --allow-collisions downgrades it to a warning
+    # (last writer wins).
+    clashes: dict[str, list[Path]] = {}
+    for origin, p in all_sources:
+        clashes.setdefault(f"src/{origin}/{p.name}", []).append(p)
+    clashes = {d: ps for d, ps in sorted(clashes.items()) if len(ps) > 1}
+    for d, ps in clashes.items():
+        print(f"{'warning' if allow_collisions else 'error'}: "
+              f"{len(ps)} sources flatten onto {d}:", file=sys.stderr)
+        for p in sorted(ps):
+            print(f"    {p}", file=sys.stderr)
+    if clashes and not allow_collisions:
+        sys.exit("error: rename the colliding files, or pass --allow-collisions "
+                 "to keep only the last one")
+
     out = out_root / target
     if out.exists():
         shutil.rmtree(out)
@@ -233,7 +253,7 @@ def load_targets(reply: Path, cm: dict) -> tuple[dict, dict, dict]:
     return by_id, name_to_id, dir_of
 
 
-# Stage 3: lift the FetchContent_Declare blocks from the top-level CMakeLists.txt.
+# Stage 3: lift the FetchContent_Declare blocks out of the CMake text.
 def parse_fetchcontent(cml_text: str) -> dict:
     """Map declared name -> {'block': original text, 'link': alias to link}."""
     decls = {}
@@ -242,6 +262,62 @@ def parse_fetchcontent(cml_text: str) -> dict:
         name = m.group(1)
         decls[name] = {"block": m.group(0), "link": f"{name}::{name}"}
     return decls
+
+
+_INCLUDE_RE = re.compile(r"^[ \t]*include[ \t]*\(\s*([^)\s]+)", re.M)
+_VAR_PREFIX_RE = re.compile(r"^\$\{[^}]+\}[\\/]")
+
+
+def _resolve_include(arg: str, from_file: Path, src_root: Path) -> Path | None:
+    """Best-effort resolution of an `include(<arg>)` argument to a file.
+
+    Handles the common forms -- a path relative to the including file or to the
+    source root, a `cmake/<Module>` name, and a single leading `${VAR}/`. A path
+    that stays variable-dependent after that is skipped, not guessed.
+    """
+    arg = arg.strip('"').strip("'")
+    arg = _VAR_PREFIX_RE.sub("", arg)
+    if "$" in arg:
+        return None
+    candidates = [from_file.parent / arg, src_root / arg,
+                  src_root / "cmake" / arg]
+    if not arg.endswith(".cmake"):
+        candidates += [from_file.parent / f"{arg}.cmake",
+                       src_root / f"{arg}.cmake",
+                       src_root / "cmake" / f"{arg}.cmake"]
+    for c in candidates:
+        if c.is_file():
+            return c.resolve()
+    return None
+
+
+# Stage 3 (gather): collect the CMake text a FetchContent_Declare could live in.
+def gather_fetchcontent(src_root: Path, extra_globs: list[str]) -> dict:
+    """Scan the top CMakeLists.txt, every file it transitively `include()`s, and
+    any `--deps-file` globs, then hand the concatenated text to
+    parse_fetchcontent(). Over-collecting is harmless: a declaration whose name
+    never lands in the closure is simply never emitted.
+    """
+    texts: list[str] = []
+    seen: set[Path] = set()
+
+    def walk(f: Path) -> None:
+        f = f.resolve()
+        if f in seen or not f.is_file():
+            return
+        seen.add(f)
+        text = f.read_text()
+        texts.append(text)
+        for m in _INCLUDE_RE.finditer(text):
+            nxt = _resolve_include(m.group(1), f, src_root)
+            if nxt is not None:
+                walk(nxt)
+
+    walk(src_root / "CMakeLists.txt")
+    for pat in extra_globs:
+        for f in sorted(src_root.glob(pat)):
+            walk(f)
+    return parse_fetchcontent("\n".join(texts))
 
 
 # Stage 4: map every third-party source/build directory to the dep that owns it.
@@ -550,10 +626,20 @@ def main() -> None:
     ap.add_argument("--with-tests", action="store_true",
                     help="also carry over the registered CTest tests that cover "
                          "the extracted code")
+    ap.add_argument("--deps-file", action="append", default=[], metavar="GLOB",
+                    help="extra CMake file(s) to scan for FetchContent_Declare "
+                         "(glob relative to --src; repeatable). The top "
+                         "CMakeLists.txt and every file it include()s are always "
+                         "scanned")
+    ap.add_argument("--allow-collisions", action="store_true",
+                    help="proceed when two sources of one target flatten to the "
+                         "same src/<origin>/<basename> path (last one wins) "
+                         "instead of aborting")
     args = ap.parse_args()
 
     extract(args.target, args.src.resolve(), args.build.resolve(),
-            args.out.resolve(), args.verify, args.with_tests)
+            args.out.resolve(), args.verify, args.with_tests,
+            args.deps_file, args.allow_collisions)
 
 
 if __name__ == "__main__":
