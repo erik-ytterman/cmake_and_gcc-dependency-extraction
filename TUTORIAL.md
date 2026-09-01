@@ -227,12 +227,13 @@ for o in i['objects']: print(o['kind'], o['jsonFile'])
 ```
 
 ```
-3.28.3
+4.2.3
 codemodel codemodel-v2-a535780dfc73e26aabb2.json
 ```
 
-Filenames are content-hashed, so **always resolve them through the index** —
-never glob for `target-greeter-*.json` in production code.
+(Your CMake version and the hash in the filename will differ — the hash is
+content-derived.) Filenames are content-hashed, so **always resolve them through
+the index** — never glob for `target-greeter-*.json` in production code.
 
 ### What the codemodel gives you
 

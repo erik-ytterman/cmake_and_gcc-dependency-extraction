@@ -255,14 +255,17 @@ differ.
 translation units — no more. This is what makes the extraction **minimal**: a
 header that exists but is never `#included` is never copied.
 
-**Input:** the `.d` files under each first-party target's `*.dir/`; `top_source`
-and `top_build` for filtering.
+**Input:** the per-translation-unit `.o.d` depfiles under each first-party
+target's `*.dir/`; `top_source` and `top_build` for filtering.
 
 **Output:** `headers` — a set of absolute header paths.
 
 **Algorithm:**
 1. For each *contributing* target (first-party closure plus carried-over tests),
-   glob `build/**/CMakeFiles/<name>.dir/**/*.d`.
+   glob `build/**/CMakeFiles/<name>.dir/**/*.o.d` — the per-translation-unit
+   compiler depfiles. The match is `*.o.d`, not `*.d`: CMake ≥ 4.0 also writes a
+   link-step depfile `link.d` into the same `.dir/`, listing object files and
+   libraries rather than headers (see TUTORIAL.md Trap 5).
 2. `parse_depfile()` reads each Make-syntax `.d` file: it joins `\`-newline
    continuations, drops the target before the first `:`, and splits the
    remaining prerequisites on whitespace.
