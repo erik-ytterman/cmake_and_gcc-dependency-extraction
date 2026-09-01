@@ -46,20 +46,24 @@ import json,glob
 cm=json.load(open(sorted(glob.glob('build/.cmake/api/v1/reply/codemodel-v2-*.json'))[-1]))
 t=[o for o in cm['configurations'][0]['targets'] if o['name']=='greeter'][0]
 tf=json.load(open('build/.cmake/api/v1/reply/'+t['jsonFile']))
-print('id        ', tf['id'])
-print('type      ', tf['type'])
-print('paths     ', tf['paths'])
-print('deps      ', [d['id'] for d in tf.get('dependencies',[])])
-print('sources   ', [(s['path'], s.get('compileGroupIndex')) for s in tf['sources']])
-print('includes  ', [i['path'] for i in tf['compileGroups'][0]['includes']])
+cg=tf['compileGroups'][0]
+print('id         ', tf['id'])
+print('type       ', tf['type'])
+print('paths      ', tf['paths'])
+print('link edges ', [d['id'] for d in tf.get('dependencies',[])])
+print('sources    ', [(s['path'], s.get('compileGroupIndex')) for s in tf['sources']])
+print('include dirs', [i['path'] for i in cg['includes']])
+print('language std', cg.get('languageStandard',{}).get('standard'))
 "
 
-section "Lab 1  directory graph"
+section "Lab 1  directory tree"
 python3 -c "
 import json,glob
 cm=json.load(open(sorted(glob.glob('build/.cmake/api/v1/reply/codemodel-v2-*.json'))[-1]))
 for i,d in enumerate(cm['configurations'][0]['directories']):
-    print(i, d['source'], '->', d['build'], 'parent=', d.get('parentIndex'))
+    tix=d.get('targetIndexes',[])
+    tix=f'{len(tix)} targets' if len(tix)>4 else tix
+    print(f\"{i}  {d['source']:<22} -> {d['build']:<18} parent={d.get('parentIndex')}  {tix}\")
 "
 
 # --- Lab 2 (§5): compiler depfiles ---------------------------------------

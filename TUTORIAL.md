@@ -26,24 +26,57 @@ the core labs (§2–§9) in order. Section 12 is an optional add-on.
 
 ## Vocabulary
 
-Terms used throughout. Skim now, refer back as needed.
+Terms used throughout, in three groups — graph nomenclature, CMake, and terms
+specific to this tutorial. Skim now, refer back as needed.
+
+### Graph nomenclature
+
+Extraction is graph work, so the standard terms are used precisely.
 
 | Term | Meaning |
 |---|---|
-| **Translation unit (TU)** | One source file *plus every header it includes*, as the compiler sees it after preprocessing. One `.cpp` → one TU → one object file → one depfile. It is the unit the compiler actually reasons about, which is why per-TU facts are so precise. |
-| **Closure** | Everything transitively reachable from a starting point. *Target closure*: every library an app links, directly or through another library. *Header closure*: every header a TU includes, directly or through another header. Both get a fuller treatment in section 3. |
-| **Target graph** | The directed graph of CMake targets and the "links against" edges between them. The codemodel is its only trustworthy source. See section 3. |
-| **Dependency boundary** | The line between code the extractor copies (first-party) and code it re-declares so the tree re-fetches it (third-party). Drawn from the project's own dependency declarations. See section 3. |
-| **Depfile** (`.d` file) | A small file in Makefile syntax that the compiler writes next to each object file, listing that TU's header closure. Produced by `-MMD`. |
-| **Codemodel** | The CMake File API object describing a configured build: its targets, their sources, include directories and link edges. |
-| **First-party / third-party** | Code the project owns versus code it pulls in from outside. The boundary is drawn from the project's own dependency declarations — never from a path pattern. |
-| **Ground truth** | A fact recorded by the tool that actually did the work (CMake, the compiler), as opposed to one re-derived by inspecting files afterwards. The whole design rests on preferring the former. |
-| **Generator expression** | CMake's `$<...>` syntax, evaluated when the build files are generated rather than when the `CMakeLists.txt` is read. One of several reasons that file cannot simply be parsed. |
-| **INTERFACE library** | A CMake target that compiles nothing and exists only to pass usage requirements — include directories, defines, flags — to whatever links it. `build_info` is one. See Trap 2. |
+| **Directed graph** | A set of **nodes** joined by **edges** that each point one way (A → B). Here the nodes are CMake targets and each "A links B" is an edge. |
+| **Path / reachable** | A path is a chain of edges from one node to another; B is *reachable* from A when some path leads A → … → B. |
+| **Transitive** | Holding across a chain of edges: if A → B and B → C, then C is *transitively* reachable from A even with no direct A → C edge. |
+| **Closure** | Everything transitively reachable from a starting node. *Target closure*: every library a target links, directly or through another library. *Header closure*: every header a translation unit includes, directly or through another header. Section 3 expands both. |
+| **Traversal / walk** | Visiting every reachable node once. `transitive_closure()` does a **depth-first** walk — follow one edge as far as it goes, then back up. |
+| **Root / leaf** | The node a traversal starts from (an application target, here); a node with no outgoing edges (`rng` links nothing, so it is a leaf). |
+| **Tree** | A graph with a single root and exactly one path to every node. `directories[]` is a tree; the target graph is *not* (two apps can link one library). |
+
+### CMake
+
+| Term | Meaning |
+|---|---|
+| **Target** | The unit CMake builds or tracks — an executable, a library, or a bookkeeping "utility" target — created by `add_executable()` / `add_library()`. Every node of the target graph is a target, and everything the extractor copies belongs to one. |
+| **Executable / library** | The target kinds that carry code. A library is `STATIC` (an `.a`, folded into whatever links it — the case here), `SHARED` (an `.so`), `OBJECT` (loose `.o` files), `MODULE` (a plugin), or `INTERFACE` (builds nothing — see below). |
+| **Link / links against** | `target_link_libraries(A B)` makes A *link* B: B's compiled code and its usage requirements flow into A. These "links against" edges are what the target graph is made of. |
+| **Target graph** | The directed graph of every target and its links-against edges. The codemodel is its only trustworthy source — `--graphviz` is lossy and the `CMakeLists.txt` is unparseable (section 2). Walked outward from one target it yields that target's target closure. |
+| **Usage requirements** | The include directories, defines, flags and onward links a target exports to everything that links it — the `PUBLIC` / `INTERFACE` arguments of the `target_*` commands. |
+| **Configure / generate** | CMake's two phases: *configure* runs the `CMakeLists.txt` against the cache, *generate* writes the build files. `cmake <build>` with nothing changed is a no-op **reconfigure** that still refreshes the File API reply. |
+| **Cache** (`CMakeCache.txt`) | The variables the first configure persists (compiler, options, resolved paths); later configures reuse it. |
+| **Generator** | The build system CMake writes files for — Unix Makefiles (this project), Ninja, Visual Studio, Xcode. A **multi-config generator** (Ninja Multi-Config, Visual Studio) holds several configurations in one build tree; a single-config one holds one per build directory. |
+| **File API** | CMake's machine-readable account of a configured build (≥ 3.14). A request/reply protocol: drop a query file, reconfigure, read JSON from the reply directory, entering at `index-*.json`. Replaces every form of `CMakeLists.txt` scraping. |
+| **Codemodel** | The File API object this tool runs on: targets, their sources, include directories, language standard, link edges, and the directory tree. |
+| **Compile group** | A set of a target's sources that share compile settings — language, include directories, defines, standard (`compileGroups[]` in the codemodel). |
+| **Generator expression** | CMake's `$<...>` syntax, evaluated at *generate* time rather than when the `CMakeLists.txt` is read. One of the reasons that file cannot simply be parsed. |
+| **INTERFACE library** | A target that compiles nothing and exists only to carry usage requirements to whatever links it. `build_info` is one. Absent from `dependencies[]` — see Trap 2. |
 | **Imported target** | A target standing in for something built outside this project, e.g. produced by `find_package()`. |
-| **Multi-config generator** | A generator whose single build tree holds several configurations at once (Ninja Multi-Config, Visual Studio), as opposed to one configuration per build dir. |
-| **In-source / out-of-source build** | Whether the build directory sits inside the source tree (`./build/`) or outside it. This project's default is in-source — see Trap 3. |
-| **POC** | Proof of concept. This repo is one: it demonstrates the approach rather than being production-hardened. |
+| **FetchContent** | CMake's dependency fetcher: `FetchContent_Declare(<name> GIT_REPOSITORY … GIT_TAG …)` plus `FetchContent_MakeAvailable(<name>)` clones a pinned external at configure time and adds it via `add_subdirectory()`. `fmt` comes in this way. |
+| **CTest** | CMake's test runner. `ctest --show-only=json-v1` reports the **registered tests** — those an `add_test()` call created — and their commands. |
+| **Generated code** | Sources or headers produced during the build rather than committed — here `build_info.hpp`, which `configure_file()` fills in from a `.in` template. The extractor freezes it into the tree as a plain file. |
+| **In-source / out-of-source build** | Whether the build directory sits inside the source tree (`./build/`, this project's default) or outside it. See Trap 3. |
+
+### This tutorial
+
+| Term | Meaning |
+|---|---|
+| **Translation unit (TU)** | One source file *plus every header it includes*, as the compiler sees it after preprocessing. One `.cpp` → one TU → one object file → one depfile. Per-TU facts are precise because the compiler actually computed them. |
+| **Depfile** (`.d` file) | A small Makefile-syntax file the compiler writes next to each object file, listing that TU's header closure. Produced by `-MMD`. |
+| **Dependency boundary** | The line between code the extractor **copies** (first-party) and code it **re-declares** so the tree re-fetches it (third-party). Drawn from the project's own `FetchContent_Declare` blocks, never from a path pattern. See section 3. |
+| **First-party / third-party** | Code the project owns versus code it pulls in from outside. |
+| **Ground truth** | A fact recorded by the tool that did the work (CMake, the compiler), as opposed to one re-derived by inspecting files afterwards. The whole design prefers the former. |
+| **Extractor / extracted tree** | `tools/extract_closure.py`, and the flat, standalone directory it writes to `extracted/<target>/`. |
+| **POC** | Proof of concept. This repo demonstrates the approach rather than being production-hardened. |
 
 ---
 
