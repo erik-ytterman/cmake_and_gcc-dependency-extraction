@@ -336,7 +336,10 @@ def extract(target: str, src_root: Path, build_dir: Path, out_root: Path,
     # Headers (from .d files).
     headers: set[Path] = set()
     for tj in contributing:
-        for dep in build_dir.glob(f"**/CMakeFiles/{tj['name']}.dir/**/*.d"):
+        # Only per-TU compiler depfiles (`<source>.o.d`). CMake >= 4.0 also
+        # writes a link-step depfile `link.d` in the same `.dir/`, listing
+        # object files, static archives and system libraries -- never headers.
+        for dep in build_dir.glob(f"**/CMakeFiles/{tj['name']}.dir/**/*.o.d"):
             for pre in parse_depfile(dep):
                 pre = pre.resolve()
                 if pre.suffix in SOURCE_EXTS:
