@@ -26,8 +26,9 @@ the core labs (§2–§9) in order. Section 12 is an optional add-on.
 
 ## Vocabulary
 
-Terms used throughout, in three groups — graph nomenclature, CMake, and terms
-specific to this tutorial. Skim now, refer back as needed.
+Terms used throughout, in four groups — graph nomenclature, the compiler and
+linker, CMake, and terms specific to this tutorial. Skim now, refer back as
+needed.
 
 ### Graph nomenclature
 
@@ -42,6 +43,15 @@ Extraction is graph work, so the standard terms are used precisely.
 | **Traversal / walk** | Visiting every reachable node once. `transitive_closure()` does a **depth-first** walk — follow one edge as far as it goes, then back up. |
 | **Root / leaf** | The node a traversal starts from (an application target, here); a node with no outgoing edges (`rng` links nothing, so it is a leaf). |
 | **Tree** | A graph with a single root and exactly one path to every node. `directories[]` is a tree; the target graph is *not* (two apps can link one library). |
+
+### Compiler and linker
+
+| Term | Meaning |
+|---|---|
+| **Preprocessor** | The first pass the compiler runs: it executes `#include` (pasting the named file in as text), `#define`, and `#if`. Its output — one source with every header spliced in — is the translation unit. |
+| **Object file** (`.o`) | The compiled form of one translation unit: machine code with unresolved references to things defined elsewhere. |
+| **Compiler / linker** | The compiler turns one source into one object file. The **linker** then combines object files and libraries into an executable, resolving those cross-references. `-MMD` is a compiler flag; `link.d` (§12) is a linker artifact. |
+| **Archive / static library** (`.a`) | A collection of object files in one file. Linking against it copies in only the objects the executable actually references; nothing stays to resolve at run time. |
 
 ### CMake
 
@@ -120,6 +130,39 @@ So `build/` is where the facts come from, and `extracted/` is where the answers
 go. If a path in this tutorial confuses you, check which of those two it is
 under.
 
+### How a C++ build works
+
+If your instinct is that a build resolves imports, links by package name, and
+ships an artifact that knows its own dependencies — a C++ build does none of
+that, and the five facts below are why this tool has the shape it does.
+
+1. **Two phases, run by two different programs.** First CMake *configures* and
+   *generates* — it reads `CMakeLists.txt` and writes build files. Then a build
+   tool drives the *compiler* and *linker*. Nothing runs your `CMakeLists.txt`
+   except CMake, and nothing reads the finished binary to learn what went into
+   it.
+2. **A header is text, not a module.** `#include "rng/rng.hpp"` pastes that file
+   in, verbatim, before compilation. Ten sources that include one header compile
+   ten copies of it. There is no import graph — only textual inclusion, followed
+   transitively.
+3. **Each source is compiled alone.** One `.cpp` plus the headers it pulled in
+   becomes one *object file* (`.o`). The compiler never sees the other sources,
+   which is why a per-source fact — "what did *this* translation unit include?"
+   — is the finest one available, and the most precise.
+4. **A library is a bag of object files.** A static library (`.a`) is just its
+   `.o` files collected together; the *linker* copies the pieces an executable
+   actually references into that executable. Afterwards nothing is resolved at
+   run time — the binary is self-contained. This is why the extractor can
+   "flatten a library away": copy its sources in and let the one build compile
+   them.
+5. **The build has no manifest.** Neither the binary nor the object files record
+   which targets link which, or which headers a source needs. The only
+   machine-readable answer is what CMake and the compiler emit *while building* —
+   the File API reply and the `.d` files. That is the whole reason this tool
+   reads those two things instead of the source.
+
+Sections 3–6 are those facts turned into a procedure.
+
 ---
 
 ## 2. Why the obvious approaches fail
@@ -176,7 +219,9 @@ worth being precise about what each one is.
 ### The target graph
 
 The directed graph whose nodes are CMake targets — executables, libraries — and
-whose edges are "links against". Walking it outward from one app gives that app's
+whose edges are "links against". A target is a *build node*, not a namespace or a
+package, and its name is global; the code of a library on the graph is folded
+into whatever links it. Walking the graph outward from one app gives that app's
 **target closure**: every library whose compiled code can end up in the binary.
 
 This is what decides *which source files* the extraction copies. Get it wrong in
@@ -190,8 +235,8 @@ ordering*, so targets with nothing to build are absent from it — see Trap 2.
 
 ### The header closure
 
-For one translation unit, the set of headers the preprocessor actually reached,
-following includes transitively.
+For one translation unit — one source file, not one library — the set of headers
+the preprocessor actually pasted in, following `#include`s transitively.
 
 Note the four things it is *not*: not every header in the repo, not every header
 under an include directory, not every header named in an `#include` line (some
@@ -530,8 +575,12 @@ FetchContent_Declare(
 )
 ```
 
-The pin travels with the extraction, so the standalone tree builds against the
-same version the parent did — without vendoring a snapshot that will rot.
+`FetchContent` clones the dependency's *source* at configure time and compiles
+it as part of your build — there is no prebuilt package and no central registry
+in play. So reproducing the declaration is all the extracted tree needs: run its
+configure step and `fmt` is fetched and built again, at the same pinned tag. The
+pin travels with the extraction, so the standalone tree builds against the same
+version the parent did — without vendoring a snapshot that will rot.
 
 That leaves one question: **which files are third-party?** The answer must not be
 a path heuristic, because `_deps/` is a default that projects override, and it
