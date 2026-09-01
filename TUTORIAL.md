@@ -6,7 +6,7 @@ shrink a build — and want to understand *how* to do that reliably rather than 
 hand-copying files until it compiles.
 
 **What you'll learn:** which tools can tell you the truth about a build, how to
-query them, and the four traps that make a naive implementation quietly wrong.
+query them, and the five traps that make a naive implementation quietly wrong.
 
 **The three docs in this repo:**
 
@@ -341,6 +341,12 @@ collect into a set.
 **`-MMD` vs `-MD`:** `-MD` lists system headers too; `-MMD` omits them. You want
 `-MMD` — you are not going to copy `/usr/include/stdio.h`.
 
+> **Note (CMake ≥ 4.0): not every `.d` file is a compiler depfile.** CMake 4.0
+> also writes a *link-step* depfile named `link.d` into the same
+> `CMakeFiles/<target>.dir/`, which lists object files and libraries, not
+> headers. Collect the per-TU depfiles by matching `*.o.d`, not `*.d` — see
+> Trap 5 in [section 8](#8-the-five-traps).
+
 ### The subtlety worth internalizing
 
 Look at that depfile again. `fmt/core.h` and `build_info.hpp` are both under
@@ -487,7 +493,7 @@ Stage-by-stage detail is in [ALGORITHM.md](ALGORITHM.md).
 
 ---
 
-## 8. The four traps
+## 8. The five traps
 
 These are the ones this project actually hit. Each is a case where the naive
 implementation *looks* right and produces a tree that builds.
@@ -554,6 +560,35 @@ library the app never used, and the "minimal closure" claim quietly stops being
 true. And since the libraries have been flattened away, a carried-over test must
 compile the library sources it used to link — there is no `input` target left for
 it to link against.
+
+### Trap 5 — not every `.d` file in a target dir is a compiler depfile
+
+Stage 7 finds the header closure by globbing the `.d` files under each target's
+`CMakeFiles/<target>.dir/`. Every `.d` there is a per-translation-unit depfile —
+until CMake 4.0, which also writes a **link-step** depfile named `link.d` into
+the same directory, listing the object files, static archives and system
+libraries the link consumed:
+
+```make
+greeter: \
+  CMakeFiles/greeter.dir/src/main.cpp.o \
+  ../../libs/input/libinput.a \
+  ../../_deps/fmt-build/libfmt.a \
+  ...
+```
+
+A glob of `**/CMakeFiles/<target>.dir/**/*.d` sweeps `link.d` up with the real
+`*.o.d` files, and the Lab 2 parser — "drop everything up to the first `:`, split
+on whitespace" — turns its body into prerequisites like
+`CMakeFiles/greeter.dir/src/main.cpp.o`. Resolved against the source root (where
+it does not exist) that raised a `FileNotFoundError` on copy; a `.a` under
+`_deps/` would instead have been classified as a first-party header. Under CMake
+3.x there was no `link.d`, so the loose glob happened to be correct.
+
+**Fix:** match `*.o.d` specifically — that is the per-TU naming, and `link.d`
+does not fit it. More broadly: a filename pattern that "is always a compiler
+depfile" is an assumption the build tool can invalidate in a point release, so
+pin it to the shape you actually mean.
 
 ---
 
