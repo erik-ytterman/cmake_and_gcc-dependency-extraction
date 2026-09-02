@@ -99,10 +99,10 @@ Extraction is graph work, so the standard terms are used precisely.
 
 ## 1. The problem
 
-> **Where the labs run.** The teaching fixture is `samples/basic/`. Every hands-on
+> **Where the labs run.** The teaching sample is `samples/basic/`. Every hands-on
 > command (§2–§9, and §13) runs from there (`cd samples/basic` first); the
 > extractor itself lives at the repo root, invoked as
-> `../../tools/extract_closure.py`. A second, larger fixture —
+> `../../tools/extract_closure.py`. A second, larger sample —
 > `samples/complex_deep/` — backs §11.
 
 You have a monorepo. Four apps share a pool of libraries, each touching a
@@ -128,16 +128,16 @@ its products.
 
 | Path | Purpose |
 |---|---|
-| **The sample project** — what you extract *from* | |
+| **The basic sample** — what you extract *from* | |
 | `CMakeLists.txt` | Top level. Declares `fmt` via FetchContent, generates `build_info.hpp`, adds the subdirectories below. |
 | `apps/` | The four applications, one directory each. Deliberately shaped so their dependency subsets differ — that is what makes minimal extraction observable. |
 | `libs/` | The shared first-party libraries (`rng`, `input`). Each has `include/`, `src/`, and a `test/` registered with CTest. |
 | `cmake/` | CMake inputs that are not targets — here `build_info.hpp.in`, the template `configure_file()` turns into a generated header. This is the project's stand-in for "generated code". |
-| **The tool** — what this tutorial teaches | |
-| `../../tools/extract_closure.py` | The extractor. Pure Python, no part of the C++ build; it lives at the repo root, above `samples/`. |
+| **The extractor** — what this tutorial teaches | |
+| `../../tools/extract_closure.py` | Pure Python, no part of the C++ build; it lives at the repo root, above `samples/`. |
 | **Generated output** — both are gitignored, delete freely | |
-| `build/` | The configured build tree of the sample project, and the extractor's entire input: File API replies under `.cmake/api/`, `.d` depfiles beside each object file in `<target>/CMakeFiles/<target>.dir/`, generated headers in `generated/`, and fetched third-party sources in `_deps/`. |
-| `extracted/` | The extractor's output — one self-contained tree per app, each with its *own* nested `build/` when you pass `--verify`. |
+| `build/` | The configured build tree of the basic sample, and the extractor's entire input: File API replies under `.cmake/api/`, `.d` depfiles beside each object file in `<target>/CMakeFiles/<target>.dir/`, generated headers in `generated/`, and fetched third-party sources in `_deps/`. |
+| `extracted/` | The extractor's output — one standalone tree per app, each with its *own* nested `build/` when you pass `--verify`. |
 
 So `build/` is where the facts come from, and `extracted/` is where the answers
 go. If a path in this tutorial confuses you, check which of those two it is
@@ -269,7 +269,7 @@ First-party code is copied into the extracted tree. Third-party code is not —
 instead the project's own dependency setup is reproduced: a `FetchContent_Declare`
 is regenerated so the standalone tree re-fetches the same pinned version, and a
 `find_package()` call is re-emitted so the host toolchain supplies it. That is
-what keeps the result both self-contained and small: you get `fmt` 10.2.1 without
+what keeps the result both standalone and small: you get `fmt` 10.2.1 without
 carrying a copy of `fmt` around.
 
 Drawing this line wrong is costly in both directions. Put the boundary too far
@@ -894,7 +894,7 @@ long version for a large multi-target repo.
 executables, a first-party library tree several `add_subdirectory()` levels
 deep, and a handful of external dependencies fetched by CMake. This section is
 what changes — and, mostly, what does not — at that size.
-[`samples/complex_deep/`](samples/complex_deep/) is a second fixture built to
+[`samples/complex_deep/`](samples/complex_deep/) is a second sample built to
 that shape: a three-level library tree, `fmt` + `nlohmann_json` +
 `find_package(Threads)`, an `OBJECT` library, and a target with two
 same-basename sources. Run `samples/complex_deep/extract_all.sh` to extract every
@@ -927,7 +927,7 @@ two correct minimal trees — the `guess` / `roller` / `greeter` / `tally` split
 is that same effect in miniature.
 
 If you genuinely need *one* tree for several executables (a combined sample, a
-shared fuzz target), the tool does not build it, but the recipe is short: run it
+shared fuzz target), the extractor does not build it, but the recipe is short: run it
 per executable, then union the results — the set of `src/` files, the set of
 `include/` and `generated/` files, the set of externals — and emit one
 `CMakeLists.txt` with one `add_executable()` per binary. Because every
@@ -958,9 +958,9 @@ What still needs a human:
 - **`FETCHCONTENT_SOURCE_DIR_<NAME>` overrides / `FetchContent_Declare(... OVERRIDE_FIND_PACKAGE)`.**
   The block is regenerated from the traced arguments, so a local-path override
   travels with it and will not resolve elsewhere. Strip those before shipping.
-- **Regenerated formatting.** The block is rebuilt from the argument list, one
-  `KEYWORD value` group per line — comments and alignment from the original are
-  gone. Cosmetic, but review the emitted `CMakeLists.txt` if that matters.
+- **Regenerated formatting.** The block is regenerated from the argument list,
+  one `KEYWORD value` group per line — comments and alignment from the original
+  are gone. Cosmetic, but review the emitted `CMakeLists.txt` if that matters.
 
 ### Non-FetchContent dependencies
 
@@ -990,7 +990,7 @@ with mixed mechanisms.
 
 1. Configure the real build once, with `-MMD` (or your compiler's equivalent).
 2. `python3 tools/extract_closure.py <exe> --with-tests --verify` per executable.
-3. Read stderr. The tool tells you what it skipped and why (`note: skipping
+3. Read stderr. The extractor tells you what it skipped and why (`note: skipping
    test …`), and warns on files outside every target directory and on collisions.
 4. If the repo has non-FetchContent externals, run the §13 `link.d` check.
 5. Fix the two or three things it flagged, re-run, and let `--verify` (with

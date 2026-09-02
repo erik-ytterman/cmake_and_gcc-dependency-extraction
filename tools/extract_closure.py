@@ -872,7 +872,7 @@ def write_readme(out: Path, target: str, first_party: list[dict],
     carried_test_names = ", ".join(t["name"] for t in tests)
     body = (
         f"# {target} (extracted standalone closure)\n\n"
-        f"Minimal build closure for `{target}`, extracted from the parent "
+        f"Minimal build closure for `{target}`, extracted from its source "
         f"CMake project into a standalone tree.\n\n"
         f"- First-party targets folded in: {first_party_names}\n"
         f"- Third-party dependencies (via FetchContent): {fetchcontent_names}\n")

@@ -1,6 +1,6 @@
-# complex_deep — a larger extraction fixture
+# The complex_deep sample
 
-The larger of the two sample projects under `samples/`, shaped to exercise
+The larger of the two samples under `samples/`, shaped to exercise
 `tools/extract_closure.py` against the situations
 [TUTORIAL.md §10–11](../../TUTORIAL.md) warns about. Each `samples/*` is its own
 CMake project with its own build directory. From the repo root:
@@ -42,12 +42,11 @@ libs/
 
 `fmt` reaches `render` only through `text`'s `PUBLIC` link; `Threads` reaches
 `daemon` only through `net`'s — neither app names the dependency itself, so the
-link line is reconstructed from the folded-in library's traced
-`target_link_libraries`.
+link line is built from the folded-in library's traced `target_link_libraries`.
 
 ## What each feature checks
 
-| Fixture feature | Exercises |
+| Sample feature | Exercises |
 |---|---|
 | `mathx` with two `util.cpp` + `src/internal.hpp` | structure-preserving Stage 11 — same-basename sources no longer collide; a private sibling header stays reachable |
 | `libs/base/mathx`, `libs/net/codec` | a first-party tree 3 `add_subdirectory` levels deep |

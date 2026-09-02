@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# extract_all.sh -- configure the complex_deep fixture once, then extract every
+# extract_all.sh -- configure the complex_deep sample once, then extract every
 # app and check what each one re-declares. Run from anywhere.
 #
 #   bash samples/complex_deep/extract_all.sh [--verify]
@@ -15,7 +15,7 @@ BUILD=$SRC/build
 OUT=${TMPDIR:-/tmp}/cd-extracted
 VERIFY=${1:-}
 
-echo "== configure + build the fixture =="
+echo "== configure + build the sample =="
 cmake -S "$SRC" -B "$BUILD" -DCMAKE_CXX_FLAGS="-MMD" >/dev/null
 cmake --build "$BUILD" -j >/dev/null
 ctest --test-dir "$BUILD" --output-on-failure >/dev/null

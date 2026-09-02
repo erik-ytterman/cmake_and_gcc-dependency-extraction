@@ -648,8 +648,8 @@ are set from whether anything landed under those directories.
 
 **Function:** `write_cmakelists()`
 
-**Purpose:** Produce a self-contained build script that needs nothing from the
-parent project.
+**Purpose:** Produce a standalone build script that needs nothing from the
+source project.
 
 **Input:** the target name, `cxx_std`, `cmake_sources`, the `used_include` /
 `used_generated` flags, `fetch`, the FetchContent names to declare, the
@@ -750,7 +750,7 @@ to build it.
 ~~~markdown
 # guess (extracted standalone closure)
 
-Minimal build closure for `guess`, extracted from the parent CMake project into a standalone tree.
+Minimal build closure for `guess`, extracted from its source CMake project into a standalone tree.
 
 - First-party targets folded in: guess, input, rng
 - Third-party dependencies (via FetchContent): fmt
@@ -818,7 +818,7 @@ that came along for the ride.
   code is reproduced from the commands the project actually ran — a regenerated
   `FetchContent_Declare`, a re-emitted `find_package`, and link lines built from
   the traced `target_link_libraries` (Stages 3, 4, 12). Nothing points back at
-  the parent repo. When a target has no
-  third-party dependency at all (`tally`), Stage 12 emits neither the FetchContent
-  section nor any `target_link_libraries`, and the extracted tree then configures
-  and builds with no network access whatsoever.
+  the source project. When a target has no third-party dependency at all
+  (`tally`), Stage 12 emits neither the FetchContent section nor any
+  `target_link_libraries`, and the extracted tree then configures and builds with
+  no network access whatsoever.

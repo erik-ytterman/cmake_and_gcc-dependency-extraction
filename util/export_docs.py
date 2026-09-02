@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render the repository's Markdown docs (README, ALGORITHM, TUTORIAL) to
+"""Render the repo's Markdown docs (README, ALGORITHM, TUTORIAL) to
 standalone, self-contained HTML for reading or printing.
 
     python3 util/export_docs.py [--out DIR] [--repo DIR]
@@ -237,7 +237,7 @@ def main() -> None:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--repo", type=Path, default=default_repo,
-                    help="repository root (default: the repo containing this script)")
+                    help="repo root (default: the repo containing this script)")
     ap.add_argument("--out", type=Path, default=Path("/tmp/extract_closure"),
                     help="output directory (default: /tmp/extract_closure)")
     args = ap.parse_args()
@@ -268,7 +268,7 @@ def main() -> None:
     stamp = datetime.now().astimezone().isoformat(timespec="seconds")
     index_md = (
         "# extract_closure — documentation\n\n"
-        f"Rendered from the repository Markdown on {stamp}.\n\n"
+        f"Rendered from the repo Markdown on {stamp}.\n\n"
         f"Source commit: `{commit}`\n\n"
         "- [README](README.html) — quickstart\n"
         "- [TUTORIAL](TUTORIAL.html) — concepts and APIs, hands-on, "

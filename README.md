@@ -24,8 +24,8 @@ tools/
 util/
   export_docs.py        render the Markdown docs to standalone HTML
 samples/
-  basic/                the teaching fixture — 4 apps, 2 libs, one dependency
-  complex_deep/         the porting fixture — deep tree, several dependencies,
+  basic/                the teaching sample — 4 apps, 2 libs, one dependency
+  complex_deep/         the larger sample — deep tree, several dependencies,
                         an OBJECT library, a same-basename collision
 ```
 
@@ -113,7 +113,7 @@ Because the apps touch different library subsets, the extracted trees differ:
 
 For a bigger repo — many top-level executables, a first-party library tree many
 `add_subdirectory()` levels deep, several fetched dependencies — see
-[TUTORIAL.md §11](TUTORIAL.md) and the `samples/complex_deep/` fixture.
+[TUTORIAL.md §11](TUTORIAL.md) and the `samples/complex_deep/` sample.
 
 ### A closure with no third-party dependency
 
