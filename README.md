@@ -55,7 +55,7 @@ ctest --test-dir build --output-on-failure
 ## Extracting a minimal standalone closure
 
 `tools/extract_closure.py` extracts the minimal build closure of one application
-target into a flat, standalone, buildable tree:
+target into a standalone, buildable tree:
 
 ```sh
 cmake -S . -B build -DCMAKE_CXX_FLAGS="-MMD"     # build emits .d header deps
@@ -68,8 +68,9 @@ Output lands in `extracted/<target>/`:
 ```
 extracted/guess/
   CMakeLists.txt      standalone; fmt re-declared via FetchContent
-  src/<origin>/..     first-party sources folded in (app + linked libs)
-  include/..          first-party headers at their original include path
+  src/<origin>/..     first-party sources (app + linked libs), namespaced by
+                      origin, sub-directory structure kept; private headers too
+  include/..          first-party public headers at their original include path
   generated/..        generated headers, frozen as plain files
 ```
 
@@ -112,8 +113,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_executable(tally
-  src/rng/rng.cpp
-  src/tally/main.cpp
+  src/rng/src/rng.cpp
+  src/tally/src/main.cpp
 )
 target_include_directories(tally PRIVATE include generated)
 ```

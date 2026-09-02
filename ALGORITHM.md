@@ -10,10 +10,11 @@ described here at the point `extract()` first calls it. For each stage you get
 its **purpose**, a concrete **input** and **output**, and the **algorithm** in
 between.
 
-The goal of the whole pipeline: given one application target `T`, produce a flat,
+The goal of the whole pipeline: given one application target `T`, produce a
 standalone, buildable directory containing exactly `T`'s minimal build closure
-(first-party sources + headers + generated code), with third-party dependencies
-re-declared rather than copied.
+(first-party sources + headers + generated code, with the original directory
+structure preserved), and third-party dependencies re-declared rather than
+copied.
 
 ## The running example
 
@@ -59,8 +60,8 @@ registry.
   Stage 7   select_tests * ────── tests[]
   Stage 8   (include roots) ───── source / generated include roots, cxx_std
   Stage 9   collect_sources ───── all_sources
-  Stage 10  parse_depfile ─────── headers
-  Stage 11  collision-check + layout  extracted/<T>/{src,include,generated}
+  Stage 10  parse_depfile ─────── headers_by_origin
+  Stage 11  place + collision-check + copy  extracted/<T>/{src,include,generated}
   Stage 12  write_cmakelists ──── extracted/<T>/CMakeLists.txt
   Stage 13  write_readme ──────── extracted/<T>/README.md
   Stage 14  verify_build * ────── extracted/<T>/build/  (built + green)
@@ -79,8 +80,8 @@ registry.
 | 7  | `ctest_registry()` + `select_tests()` | the CTest registry | the covering tests to carry over |
 | 8  | inline in `extract()`     | the compile groups | include roots + C++ standard |
 | 9  | `collect_sources()`       | target `sources[]` | the `.cpp` files to copy |
-| 10 | `parse_depfile()`         | the `*.o.d` depfiles | the exact header set to copy |
-| 11 | inline (uses `longest_root()`) | sources + headers | the flat `extracted/<T>/` tree |
+| 10 | `parse_depfile()`         | the `*.o.d` depfiles | the exact header set to copy, per origin |
+| 11 | inline (uses `longest_root()`) | sources + headers | the `extracted/<T>/` tree, structure preserved |
 | 12 | `write_cmakelists()`      | the collected facts | a standalone `CMakeLists.txt` |
 | 13 | `write_readme()`          | the target lists | a `README.md` |
 | 14 | `verify_build()`          | the extracted tree | a proof it configures, builds, passes |
@@ -508,8 +509,8 @@ all_sources = app_sources ∪ every test's sources
 **Algorithm:** Keep each `sources[]` entry that has a non-null
 `compileGroupIndex` (actually compiled, not just a header listed as a source),
 resolve its `path` against `top_source`, and keep it if its extension is
-`.c/.cc/.cpp/.cxx`. Retain the `origin` name so sources can be namespaced on copy
-and collisions avoided.
+`.c/.cc/.cpp/.cxx`. Retain the `origin` name so Stage 11 can file each source
+relative to that target's directory, under `src/<origin>/`.
 
 `collect_sources()` is called once over the app's `first_party`, then once per
 carried-over test over *that test's* first-party closure. A test's list therefore
@@ -548,12 +549,15 @@ build/apps/guess/CMakeFiles/guess.dir/src/main.cpp.o.d:
 (GCC really does list `core.h` twice; `parse_depfile()` returns a `set`, so
 duplicates collapse.)
 
-**Output:** `headers` — a set of absolute header paths.
+**Output:** `headers_by_origin` — absolute header paths, keyed by the target
+whose translation units pulled them (Stage 11 uses that key to file a private
+header next to the right target's sources).
 
 ```python
-{ "…/build/generated/build_info.hpp",
-  "…/libs/input/include/input/input.hpp",
-  "…/libs/rng/include/rng/rng.hpp" }
+{ "guess": { "…/build/generated/build_info.hpp",
+             "…/libs/input/include/input/input.hpp",
+             "…/libs/rng/include/rng/rng.hpp" },
+  "input_test": { … }, "rng_test": { … } }
 ```
 
 **Algorithm:**
@@ -577,15 +581,17 @@ generated code.
 
 ---
 
-## Stage 11 — Lay out the flat extracted tree
+## Stage 11 — Lay out the extracted tree
 
 **Function:** inline in `extract()` (uses `longest_root()`)
 
-**Purpose:** Materialise a clean, flat directory whose layout preserves every
-include path, so the copied sources compile unmodified.
+**Purpose:** Materialise a clean directory that keeps every include path
+resolving — angle-bracket includes via `-I include` / `-I generated`,
+file-relative quote includes because siblings stay siblings — so the copied
+sources compile unmodified.
 
-**Input:** `all_sources`, `headers`, `src_inc_roots`, `gen_inc_roots`, the output
-root.
+**Input:** `all_sources`, `headers_by_origin`, `src_inc_roots`, `gen_inc_roots`,
+`origin_dir` (each target name → its own source directory), the output root.
 
 **Output:** files on disk under `extracted/guess/`, plus the bookkeeping the next
 stage needs.
@@ -593,46 +599,47 @@ stage needs.
 ```
 extracted/guess/
 ├── src/
-│   ├── guess/main.cpp
-│   ├── input/input.cpp
-│   ├── rng/rng.cpp
-│   ├── input_test/input_test.cpp
-│   └── rng_test/rng_test.cpp
+│   ├── guess/src/main.cpp
+│   ├── input/src/input.cpp
+│   ├── rng/src/rng.cpp
+│   ├── input_test/test/input_test.cpp
+│   └── rng_test/test/rng_test.cpp
 ├── include/
 │   ├── input/input.hpp
 │   └── rng/rng.hpp
 └── generated/
     └── build_info.hpp
 
-cmake_sources            = [ "src/guess/main.cpp", "src/input/input.cpp", "src/rng/rng.cpp" ]
-input_test.cmake_sources = [ "src/input/input.cpp", "src/input_test/input_test.cpp" ]
-rng_test.cmake_sources   = [ "src/rng/rng.cpp", "src/rng_test/rng_test.cpp" ]
+cmake_sources            = [ "src/guess/src/main.cpp", "src/input/src/input.cpp", "src/rng/src/rng.cpp" ]
+input_test.cmake_sources = [ "src/input/src/input.cpp", "src/input_test/test/input_test.cpp" ]
+rng_test.cmake_sources   = [ "src/rng/src/rng.cpp", "src/rng_test/test/rng_test.cpp" ]
 used_include = True   used_generated = True
 ```
 
-**Algorithm:**
-- **Collision check (first, before any write):** group `all_sources` by their
-  target destination `src/<origin>/<basename>`. If two different source paths
-  map to one destination, print every clash and `sys.exit` — unless
-  `--allow-collisions`, which downgrades it to a warning and lets the last write
-  win. On the sample nothing collides.
-- Remove any prior `extracted/guess/` and create `src/`.
-- **Sources:** copy each to `src/<origin>/<basename>` and record its
-  output-relative path. `cmake_sources` is that path for each of `app_sources`;
-  each test record gets its own from its own source list.
-- **Headers:** for each header, pick the destination by the *longest matching
-  include root* (`longest_root()`):
-  - try `gen_inc_roots` (build tree) **first** → `generated/<relpath>`, set
-    `used_generated` (`…/build/generated` + `build_info.hpp` →
-    `generated/build_info.hpp`). Checking the build root first is what keeps
-    generated headers out of `include/` despite the in-source build dir.
-  - else try `src_inc_roots` → `include/<relpath>`, set `used_include`
-    (`…/libs/input/include` + `input/input.hpp` → `include/input/input.hpp`).
-  - if no root matches, fall back to `include/<basename>` and warn.
+**Algorithm:** the structure is *preserved*, not flattened. Two placement rules,
+each keeping a file's path relative to a meaningful root:
 
-The result is `src/` (flattened, namespaced by origin), `include/` (headers at
-their original include-relative path), and `generated/` (frozen generated
-headers).
+- **`place_source(path, origin)`** — a source keeps its path relative to its
+  target's own directory, under a one-level `src/<origin>/` namespace:
+  `libs/rng/src/rng.cpp` (target `rng`) → `src/rng/src/rng.cpp`. A generated
+  source (under the build tree) goes to `generated/<relpath>`. A source listed
+  from outside its target's directory falls back to `src/<origin>/<basename>`
+  with a warning.
+- **`place_header(path, origin)`** — a *public* header (under a `src_inc_roots`
+  entry) keeps its include-relative path under `include/`:
+  `libs/input/include/input/input.hpp` → `include/input/input.hpp`. A generated
+  header → `generated/<relpath>` (checked first, so an in-source build dir does
+  not misfile it into `include/`). A *private* header — under no include root —
+  is filed next to the target's sources, `src/<origin>/<relpath>`, so a
+  file-relative `#include "internal.hpp"` still resolves; a header pulled by two
+  targets is copied under each.
+
+Then: resolve every file to its destination, **collision-check** (if two
+different files map to one destination, print each clash and `sys.exit` unless
+`--allow-collisions` — now rare, since preserved paths seldom coincide), remove
+any prior `extracted/guess/`, copy, and record each source's output-relative
+path into `cmake_sources` (and each test's own list). `used_include` /
+`used_generated` are set from whether anything landed under those directories.
 
 ---
 
@@ -667,9 +674,9 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(fmt)
 
 add_executable(guess
-  src/guess/main.cpp
-  src/input/input.cpp
-  src/rng/rng.cpp
+  src/guess/src/main.cpp
+  src/input/src/input.cpp
+  src/rng/src/rng.cpp
 )
 target_include_directories(guess PRIVATE include generated)
 target_link_libraries(guess PRIVATE fmt::fmt)
@@ -677,16 +684,16 @@ target_link_libraries(guess PRIVATE fmt::fmt)
 enable_testing()
 
 add_executable(input_test
-  src/input/input.cpp
-  src/input_test/input_test.cpp
+  src/input/src/input.cpp
+  src/input_test/test/input_test.cpp
 )
 target_include_directories(input_test PRIVATE include generated)
 target_link_libraries(input_test PRIVATE fmt::fmt)
 add_test(NAME input_test COMMAND input_test)
 
 add_executable(rng_test
-  src/rng/rng.cpp
-  src/rng_test/rng_test.cpp
+  src/rng/src/rng.cpp
+  src/rng_test/test/rng_test.cpp
 )
 target_include_directories(rng_test PRIVATE include generated)
 add_test(NAME rng_test COMMAND rng_test)
@@ -742,7 +749,7 @@ to build it.
 ~~~markdown
 # guess (extracted standalone closure)
 
-Minimal build closure for `guess`, extracted from the parent CMake project into a flat, standalone tree.
+Minimal build closure for `guess`, extracted from the parent CMake project into a standalone tree.
 
 - First-party targets folded in: guess, input, rng
 - Third-party dependencies (via FetchContent): fmt

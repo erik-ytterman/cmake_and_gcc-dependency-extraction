@@ -86,10 +86,10 @@ Extraction is graph work, so the standard terms are used precisely.
 | **Depfile** (`.d` file) | A small Makefile-syntax file the compiler writes next to each object file, listing that TU's header closure. Produced by `-MMD`. |
 | **Dependency boundary** | The line between code the extractor **copies** (first-party) and code it **re-declares** (third-party) — a regenerated `FetchContent_Declare`, or a re-emitted `find_package()`. Drawn from the command trace, never from a path pattern. See section 3. |
 | **First-party / third-party** | Code the project owns versus code it pulls in from outside. "Third-party" and "external" are used interchangeably; the code calls the list `externals`. |
-| **Fold in / flatten** | Two distinct moves. A first-party library is **folded into** its consumer: the library target is dropped and its sources compile straight into the executable (and each carried-over test). Separately, the source *directory layout* is **flattened**: every source lands at `src/<origin>/<basename>`, one level deep. |
+| **Fold in** | A first-party library is **folded into** its consumer: the library target is dropped and its sources compile straight into the executable (and into each carried-over test). The files keep their sub-directory structure — sources and private headers under `src/<origin>/…`, public headers under `include/…` — so nothing is *flattened*. |
 | **Link line / link token** | The `target_link_libraries(<exe> PRIVATE …)` the extractor emits for one executable is its **link line**; each entry in it (`fmt::fmt`, `input`) is a **link token**. Stage 3 reads the source project's link tokens from the trace. |
 | **Ground truth** | A fact recorded by the tool that did the work (CMake, the compiler), as opposed to one re-derived by inspecting files afterwards. The whole design prefers the former. |
-| **Extractor / extracted tree** | `tools/extract_closure.py`, and the flat, standalone directory it writes to `extracted/<target>/`. |
+| **Extractor / extracted tree** | `tools/extract_closure.py`, and the standalone directory it writes to `extracted/<target>/`. |
 | **POC** | Proof of concept. This repo demonstrates the approach rather than being production-hardened. |
 
 ---
@@ -661,8 +661,8 @@ it, and a test target can be named anything at all.
                               ▼
                       extracted/<app>/
                         CMakeLists.txt   generated, standalone
-                        src/<origin>/..  sources, flattened + namespaced
-                        include/..       headers at their original rel. path
+                        src/<origin>/..  sources + private headers, namespaced
+                        include/..       public headers at their original path
                         generated/..     generated headers, frozen
 ```
 
@@ -684,8 +684,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_executable(tally
-  src/rng/rng.cpp
-  src/tally/main.cpp
+  src/rng/src/rng.cpp
+  src/tally/src/main.cpp
 )
 target_include_directories(tally PRIVATE include generated)
 ```
@@ -865,9 +865,10 @@ long version for a large multi-target repo.
 - [ ] **Handle multi-config generators.** This POC reads
       `configurations[0]`. Ninja Multi-Config and Visual Studio have several —
       pick deliberately, or extract per configuration.
-- [ ] **Basename collisions abort by default.** Sources flatten to
-      `src/<origin>/<basename>`; two sources of one target with the same
-      basename now stop the run (pass `--allow-collisions` to keep the last).
+- [ ] **Collisions abort by default (now rare).** Files keep their sub-directory
+      structure under `src/<origin>/`, so same-basename sources no longer clash.
+      Two libraries that both expose `include/<same/path.hpp>` still do — rename
+      one, or `--allow-collisions` to keep the last.
 - [ ] **Decide about generated code.** This POC freezes generated headers as
       plain files. If yours embeds a version or a build stamp that must stay
       live, copy the `.in` template and the `configure_file()` call instead.
@@ -916,8 +917,8 @@ shared fuzz target), the tool does not build it, but the recipe is short: run it
 per executable, then union the results — the set of `src/` files, the set of
 `include/` and `generated/` files, the set of externals — and emit one
 `CMakeLists.txt` with one `add_executable()` per binary. Because every
-per-executable tree is already flat and namespaced by origin, the union is a
-merge with no path conflicts (basename collisions aside — see below).
+per-executable tree keeps its structure under a `src/<origin>/` namespace, the
+union is a merge with essentially no path conflicts.
 
 ### Several FetchContent dependencies
 
@@ -964,9 +965,9 @@ with mixed mechanisms.
 
 | At scale you hit | Where it bites | Minimal fix |
 |---|---|---|
-| **Basename collisions** — `foo/util.cpp` and `bar/util.cpp` in one target | Stage 11 aborts with both paths | rename one, or `--allow-collisions` to keep the last |
+| **Path collisions** — two libraries expose `include/<same/path.hpp>`, or a source is listed from outside its target's dir and its basename clashes | Stage 11 aborts with both paths (same-basename sources within a target no longer clash — structure is kept) | rename one, or `--allow-collisions` to keep the last |
 | **Multi-config generator** (Ninja Multi-Config, VS) | `load_targets()` reads `configurations[0]` only | extract once per configuration, or hard-code the index you ship |
-| **`OBJECT` libraries** | absent from `link.commandFragments` as archives; their sources attach to the consuming target | usually fine — the sources are already in the closure; verify with `--verify` |
+| **`OBJECT` libraries** | the extractor works off `dependencies[]` + `sources[]`, not `link.commandFragments`; an OBJECT lib's sources attach to the consuming target | usually fine — the sources are already in the closure; verify with `--verify` |
 | **Generator expressions in include dirs** | the codemodel gives the *resolved* path, so this is fine — but a `$<BUILD_INTERFACE>` path under the build tree lands in `generated/` | check `generated/` after extraction; move genuinely-source headers if misfiled |
 | **Per-config compile groups** | Stage 8 takes the *last* `languageStandard` it sees | if targets disagree, set `CMAKE_CXX_STANDARD` in the emitted file by hand to the max |
 | **Install rules / exported targets** | ignored — the extracted tree has none | add them back only if the extracted tree is itself meant to be installed |
@@ -976,7 +977,7 @@ with mixed mechanisms.
 1. Configure the real build once, with `-MMD` (or your compiler's equivalent).
 2. `python3 tools/extract_closure.py <exe> --with-tests --verify` per executable.
 3. Read stderr. The tool tells you what it skipped and why (`note: skipping
-   test …`), and warns on headers with no include root and on collisions.
+   test …`), and warns on files outside every target directory and on collisions.
 4. If the repo has non-FetchContent externals, run the §13 `link.d` check.
 5. Fix the two or three things it flagged, re-run, and let `--verify` (with
    `--with-tests`) be the gate.
