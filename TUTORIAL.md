@@ -704,7 +704,9 @@ with no `_deps/` — it compiles with no network access at all. The generated
 `build_info.hpp` still made it in, which is the split in a nutshell: generated
 code is frozen into the tree, third-party code is the only thing left to fetch.
 
-Stage-by-stage detail is in [ALGORITHM.md](ALGORITHM.md).
+Stage-by-stage detail is in [ALGORITHM.md](ALGORITHM.md); every command-line
+flag and its default is in
+[README.md § Command-line reference](README.md#command-line-reference).
 
 ---
 

@@ -179,3 +179,53 @@ You can also emit the raw target graph directly for inspection:
 ```sh
 cmake --graphviz=build/deps.dot -S . -B build
 ```
+
+## Command-line reference
+
+```
+python3 tools/extract_closure.py TARGET [--src DIR] [--build DIR] [--out DIR]
+                                        [--with-tests] [--verify]
+                                        [--deps-file GLOB ...] [--allow-collisions]
+```
+
+| Argument | Default | What it does |
+|---|---|---|
+| `TARGET` | *(required)* | The executable to extract, named by its **CMake target name** — not a path, not the output filename. An unknown name exits with the full list of available targets. |
+| `--src DIR` | `.` | Source root of the project being read (the directory with its top-level `CMakeLists.txt`). Only actually consulted to resolve `--deps-file` globs; every other input is taken from the build dir, which records its own source path. |
+| `--build DIR` | `build` | The project's already-configured build directory, resolved against the **current working directory** (not against `--src`). Must have been configured with CMake ≥ 3.21 and compiled with `-MMD` so the per-translation-unit `.d` files exist. |
+| `--out DIR` | `extracted` | Output root. The standalone tree is written to `<out>/<TARGET>/`; an existing `<out>/<TARGET>/` is deleted and rewritten on each run. |
+| `--with-tests` | off | Also carry over the registered CTest tests that cover the extracted code. A test is taken only when every first-party library it links is already in the closure, so tests never enlarge the tree; one that would is reported and skipped. Adds `enable_testing()` + an `add_executable()` / `add_test()` per test to the emitted `CMakeLists.txt`. |
+| `--verify` | off | After extracting, configure and build `<out>/<TARGET>/` to prove it stands alone. With `--with-tests` it also runs `ctest`. Needs network access when the closure re-declares a FetchContent dependency (it re-fetches, e.g. `fmt`). |
+| `--deps-file GLOB` | *(none)* | Extra CMake file(s) to text-scan for `FetchContent_Declare` blocks — a glob relative to `--src`, repeatable. Rarely needed: the command trace already captures every declaration that runs at configure time. Use it only for one guarded behind an `if()` the trace never enters. |
+| `--allow-collisions` | off | Proceed (keeping the last file) when two different files map to the same path in the extracted tree, instead of aborting with both paths listed. Rare now that sub-directory structure is preserved — mostly two libraries exposing the same `include/<path>.hpp`. |
+
+### Examples
+
+All from inside `samples/basic` unless noted.
+
+```sh
+cd samples/basic
+
+# Extract `guess` into ./extracted/guess/ — nothing else
+python3 ../../tools/extract_closure.py guess
+
+# ...and prove the emitted tree configures and builds on its own
+python3 ../../tools/extract_closure.py guess --verify
+
+# ...and carry its covering CTest tests over, running them under --verify
+python3 ../../tools/extract_closure.py guess --with-tests --verify
+
+# `tally` links no third-party dependency: the emitted CMakeLists has no FetchContent
+python3 ../../tools/extract_closure.py tally --verify
+
+# Run from the repo root instead, with an explicit output location
+cd ../..
+python3 tools/extract_closure.py guess \
+    --src samples/basic --build samples/basic/build --out /tmp/closures
+
+# Cover a FetchContent_Declare that sits behind an if() the trace never enters
+python3 ../../tools/extract_closure.py guess --deps-file 'cmake/*.cmake'
+```
+
+For the larger sample and its per-app extraction script, see
+`samples/complex_deep/` and [TUTORIAL.md §11](TUTORIAL.md).

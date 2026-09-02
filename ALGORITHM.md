@@ -44,6 +44,10 @@ Before it runs:
 No source file is ever parsed by hand; every fact comes from CMake or the
 compiler.
 
+Every command-line flag, its default and a set of worked invocations are in
+[README.md § Command-line reference](README.md#command-line-reference); this
+document notes each flag again at the stage it gates.
+
 ## Execution order at a glance
 
 The extractor consumes four facts the configured build already produced: the
