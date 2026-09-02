@@ -18,17 +18,17 @@ copied.
 
 ## The running example
 
-Every stage below is illustrated with one real run of the sample project in this
-repo:
+Every stage below is illustrated with one real run against the `samples/basic/`
+project, from inside that directory:
 
 ```sh
-python3 tools/extract_closure.py guess --with-tests --verify
+python3 ../../tools/extract_closure.py guess --with-tests --verify
 ```
 
 `guess` links the first-party libraries `rng` and `input`, the generated
 `build_info` header, and the third-party library `fmt`. Both flags are on, so
-every optional stage runs too. Paths are abbreviated with `…` for the repo root
-`/home/.../cmake_and_gcc-dependency-extraction`.
+every optional stage runs too. Paths are abbreviated with `…` for the sample
+source root `…/samples/basic` (and `…/samples/basic/build` for the build tree).
 
 ## Prerequisites (what the build must already have produced)
 

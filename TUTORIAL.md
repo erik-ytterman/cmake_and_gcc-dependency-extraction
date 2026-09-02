@@ -99,6 +99,12 @@ Extraction is graph work, so the standard terms are used precisely.
 
 ## 1. The problem
 
+> **Where the labs run.** The teaching fixture is `samples/basic/`. Every hands-on
+> command (§2–§9, and §13) runs from there (`cd samples/basic` first); the
+> extractor itself lives at the repo root, invoked as
+> `../../tools/extract_closure.py`. A second, larger fixture —
+> `samples/complex_deep/` — backs §11.
+
 You have a monorepo. Four apps share a pool of libraries, each touching a
 different subset, plus some generated code and a third-party dependency:
 
@@ -114,13 +120,13 @@ sources it actually links, the headers it actually includes, and nothing else.
 
 The hard part is *nothing else*. Anyone can copy the whole repo.
 
-### The repo at a glance
+### The layout at a glance
 
-Three different things live side by side here, and it helps to keep them
-straight before you start — especially `build/`, which is an *input* to the
-extractor, not one of its products.
+Paths below are relative to `samples/basic/` unless noted. Keep three things
+straight — especially `build/`, which is an *input* to the extractor, not one of
+its products.
 
-| Directory | Purpose |
+| Path | Purpose |
 |---|---|
 | **The sample project** — what you extract *from* | |
 | `CMakeLists.txt` | Top level. Declares `fmt` via FetchContent, generates `build_info.hpp`, adds the subdirectories below. |
@@ -128,9 +134,9 @@ extractor, not one of its products.
 | `libs/` | The shared first-party libraries (`rng`, `input`). Each has `include/`, `src/`, and a `test/` registered with CTest. |
 | `cmake/` | CMake inputs that are not targets — here `build_info.hpp.in`, the template `configure_file()` turns into a generated header. This is the project's stand-in for "generated code". |
 | **The tool** — what this tutorial teaches | |
-| `tools/` | `extract_closure.py`, the extractor. Pure Python, no part of the C++ build. |
+| `../../tools/extract_closure.py` | The extractor. Pure Python, no part of the C++ build; it lives at the repo root, above `samples/`. |
 | **Generated output** — both are gitignored, delete freely | |
-| `build/` | The configured build tree of the *parent* project, and the extractor's entire input: File API replies under `.cmake/api/`, `.d` depfiles beside each object file in `<target>/CMakeFiles/<target>.dir/`, generated headers in `generated/`, and fetched third-party sources in `_deps/`. |
+| `build/` | The configured build tree of the sample project, and the extractor's entire input: File API replies under `.cmake/api/`, `.d` depfiles beside each object file in `<target>/CMakeFiles/<target>.dir/`, generated headers in `generated/`, and fetched third-party sources in `_deps/`. |
 | `extracted/` | The extractor's output — one self-contained tree per app, each with its *own* nested `build/` when you pass `--verify`. |
 
 So `build/` is where the facts come from, and `extracted/` is where the answers
@@ -672,7 +678,7 @@ it, and a test target can be named anything at all.
 Run it and read the result:
 
 ```sh
-python3 tools/extract_closure.py greeter --verify
+python3 ../../tools/extract_closure.py greeter --verify
 cat extracted/greeter/CMakeLists.txt
 ```
 
@@ -884,13 +890,15 @@ long version for a large multi-target repo.
 
 ## 11. Porting guide: a large multi-target monorepo
 
-The sample project is deliberately tiny. A real one has a dozen top-level
+`samples/basic/` is deliberately tiny. A real project has a dozen top-level
 executables, a first-party library tree several `add_subdirectory()` levels
 deep, and a handful of external dependencies fetched by CMake. This section is
 what changes — and, mostly, what does not — at that size.
-[`complex_deep/`](complex_deep/) is a second fixture built to that shape: a
-three-level library tree, `fmt` + `nlohmann_json` + `find_package(Threads)`, an
-`OBJECT` library, and a target with two same-basename sources.
+[`samples/complex_deep/`](samples/complex_deep/) is a second fixture built to
+that shape: a three-level library tree, `fmt` + `nlohmann_json` +
+`find_package(Threads)`, an `OBJECT` library, and a target with two
+same-basename sources. Run `samples/complex_deep/extract_all.sh` to extract every
+app in it.
 
 ### The pipeline is per-target, and most of it already scales
 
@@ -995,17 +1003,17 @@ with mixed mechanisms.
 Everything in this tutorial through §9 is executable, and
 [`tools/test_tutorial.sh`](tools/test_tutorial.sh) runs all of it end to end.
 It is the tutorial as a script: the same commands, in the same order, against
-this repo. Use it two ways — as a smoke test that the pipeline still works on
-your machine, and as a way to see every lab's real output scroll past before you
-read the prose behind it. (Sections 11 and 13 are prose only — a porting guide
-and an optional CMake ≥ 4.0 lab — and are not in the script.)
+`samples/basic/`. Use it two ways — as a smoke test that the pipeline still works
+on your machine, and as a way to see every lab's real output scroll past before
+you read the prose behind it. (Sections 11 and 13 are prose only — a porting
+guide and an optional CMake ≥ 4.0 lab — and are not in the script.)
 
 ```sh
 bash tools/test_tutorial.sh
 ```
 
-It runs from any directory (it `cd`s to the repo root itself) and reproduces, in
-order:
+It runs from any directory (it `cd`s into `samples/basic/` and invokes the
+extractor by its repo-root path) and reproduces, in order:
 
 | Section printed | What it does |
 |---|---|

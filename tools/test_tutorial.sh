@@ -2,7 +2,7 @@
 # test_tutorial.sh — run every command block in TUTORIAL.md end to end.
 #
 # Reproduces §2, Lab 1 (§4), Lab 2 (§5), Lab 3 (§6), the §7 extractor runs,
-# and the §9 Q2 check. Run from the repo root:
+# and the §9 Q2 check. Run from anywhere:
 #
 #     bash tools/test_tutorial.sh
 #
@@ -10,8 +10,10 @@
 
 set -euo pipefail
 
-# Always operate from the repo root, regardless of where we're invoked from.
-cd "$(dirname "$0")/.."
+# The labs run inside the basic sample; the extractor lives up in tools/.
+REPO=$(cd "$(dirname "$0")/.." && pwd)
+TOOL="python3 $REPO/tools/extract_closure.py"
+cd "$REPO/samples/basic"
 
 section() { printf '\n========== %s ==========\n' "$1"; }
 
@@ -87,12 +89,12 @@ section "Lab 3  ctest introspection"
 
 # --- §7: putting it together ---------------------------------------------
 section "§7  extract greeter --verify"
-python3 tools/extract_closure.py greeter --verify
+$TOOL greeter --verify
 echo "--- extracted/greeter/CMakeLists.txt ---"
 cat extracted/greeter/CMakeLists.txt
 
 section "§7  extract tally --verify  (no third-party dependency)"
-python3 tools/extract_closure.py tally --verify
+$TOOL tally --verify
 echo "--- extracted/tally/CMakeLists.txt ---"
 cat extracted/tally/CMakeLists.txt
 echo "--- tally has no _deps/ in its build tree: ---"
@@ -104,7 +106,7 @@ fi
 
 # --- §9 Q2: tally --with-tests still emits no FetchContent ----------------
 section "§9 Q2  tally --with-tests emits no FetchContent"
-python3 tools/extract_closure.py tally --with-tests >/dev/null
+$TOOL tally --with-tests >/dev/null
 if grep -q FetchContent extracted/tally/CMakeLists.txt; then
   echo "UNEXPECTED: FetchContent present"; exit 1
 else

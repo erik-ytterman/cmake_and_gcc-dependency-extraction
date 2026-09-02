@@ -1,19 +1,20 @@
 # complex_deep — a larger extraction fixture
 
-A second sample project, independent of the repo-root one, shaped to exercise
-`tools/extract_closure.py` against the situations [TUTORIAL.md §10–11](../TUTORIAL.md)
-warns about. It is **not** built by the root `CMakeLists.txt`; configure it on
-its own:
+The larger of the two sample projects under `samples/`, shaped to exercise
+`tools/extract_closure.py` against the situations
+[TUTORIAL.md §10–11](../../TUTORIAL.md) warns about. Each `samples/*` is its own
+CMake project with its own build directory. From the repo root:
 
 ```sh
-cmake -S complex_deep -B complex_deep/build -DCMAKE_CXX_FLAGS="-MMD"
-cmake --build complex_deep/build -j
-ctest --test-dir complex_deep/build
+cmake -S samples/complex_deep -B samples/complex_deep/build -DCMAKE_CXX_FLAGS="-MMD"
+cmake --build samples/complex_deep/build -j
+ctest --test-dir samples/complex_deep/build
 python3 tools/extract_closure.py <app> \
-    --src complex_deep --build complex_deep/build --out /tmp/cd --with-tests --verify
+    --src samples/complex_deep --build samples/complex_deep/build \
+    --out /tmp/cd --with-tests --verify
 ```
 
-`complex_deep/extract_all.sh` runs the extraction for every app.
+`samples/complex_deep/extract_all.sh` runs the extraction for every app.
 
 ## The library tree (several `add_subdirectory` levels deep)
 

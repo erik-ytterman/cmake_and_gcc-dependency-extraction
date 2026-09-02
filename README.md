@@ -1,8 +1,9 @@
 # cmake + gcc dependency-extraction POC (proof of concept)
 
-A small CMake/CTest project shaped to explore **minimal per-application code
-closure extraction**. Four applications draw from a shared pool of libraries,
-each touching a *different subset*, plus generated code.
+Explores **minimal per-application code closure extraction**: given one
+executable in a CMake project, produce a standalone, buildable tree with only
+that executable's sources, headers, generated code, and re-declared third-party
+dependencies — nothing else.
 
 | Doc | Role |
 |---|---|
@@ -16,23 +17,34 @@ each touching a *different subset*, plus generated code.
 ## Structure
 
 ```
-CMakeLists.txt            top-level: fmt (FetchContent) + generated build_info
-cmake/build_info.hpp.in   template for generated code
-libs/
-  rng/                    random-number wrapper (stdlib only)
-  input/                  user-input wrapper (depends on fmt)
-apps/
-  guess/                  number guessing game : input + rng + fmt + build_info
-  roller/                 dice roller          :         rng + fmt + build_info
-  greeter/                greeter              : input +       fmt + build_info
-  tally/                  die-roll histogram   :         rng +       build_info
-tools/extract_closure.py  the extractor
-util/export_docs.py       render the Markdown docs to standalone HTML
-complex_deep/             a larger, separate fixture — deep library tree, several
-                          dependencies, an OBJECT library, a same-basename clash
+README.md ALGORITHM.md TUTORIAL.md   the docs
+tools/
+  extract_closure.py    the extractor
+  test_tutorial.sh      runs every TUTORIAL lab against samples/basic
+util/
+  export_docs.py        render the Markdown docs to standalone HTML
+samples/
+  basic/                the teaching fixture — 4 apps, 2 libs, one dependency
+  complex_deep/         the porting fixture — deep tree, several dependencies,
+                        an OBJECT library, a same-basename collision
 ```
 
-## Dependency subsets
+Each `samples/*` is its own CMake project with its own `project()` and build
+directory. The extractor is pointed at one with `--src` / `--build`.
+
+## The basic sample
+
+```
+samples/basic/
+  CMakeLists.txt            top-level: fmt (FetchContent) + generated build_info
+  cmake/build_info.hpp.in   template for generated code
+  libs/rng/                 random-number wrapper (stdlib only)
+  libs/input/               user-input wrapper (depends on fmt)
+  apps/guess/               number guessing game : input + rng + fmt + build_info
+  apps/roller/              dice roller          :         rng + fmt + build_info
+  apps/greeter/             greeter              : input +       fmt + build_info
+  apps/tally/               die-roll histogram   :         rng +       build_info
+```
 
 | target   | input | rng | fmt | build_info (generated) |
 |----------|:-----:|:---:|:---:|:----------------------:|
@@ -42,13 +54,14 @@ complex_deep/             a larger, separate fixture — deep library tree, seve
 | tally    |       |  x  |     |           x            |
 
 Because the closures differ per target, extracting the *minimal* closure of a
-single app produces a genuinely smaller, flatter, standalone tree. `tally` is
-deliberately the one app with **no third-party dependency at all** — it exists to
-show what the extracted tree looks like when there is nothing to re-declare.
+single app produces a genuinely smaller, standalone tree. `tally` is deliberately
+the one app with **no third-party dependency at all** — it shows what the
+extracted tree looks like when there is nothing to re-declare.
 
 ## Build & test
 
 ```sh
+cd samples/basic
 cmake -S . -B build
 cmake --build build -j
 ctest --test-dir build --output-on-failure
@@ -60,9 +73,10 @@ ctest --test-dir build --output-on-failure
 target into a standalone, buildable tree:
 
 ```sh
-cmake -S . -B build -DCMAKE_CXX_FLAGS="-MMD"     # build emits .d header deps
+cd samples/basic
+cmake -S . -B build -DCMAKE_CXX_FLAGS="-MMD"       # build emits .d header deps
 cmake --build build -j
-python3 tools/extract_closure.py guess --verify  # --verify configures+builds it
+python3 ../../tools/extract_closure.py guess --verify   # --verify configures+builds it
 ```
 
 Output lands in `extracted/<target>/`:
@@ -99,7 +113,7 @@ Because the apps touch different library subsets, the extracted trees differ:
 
 For a bigger repo — many top-level executables, a first-party library tree many
 `add_subdirectory()` levels deep, several fetched dependencies — see
-[TUTORIAL.md §11](TUTORIAL.md).
+[TUTORIAL.md §11](TUTORIAL.md) and the `samples/complex_deep/` fixture.
 
 ### A closure with no third-party dependency
 
@@ -135,7 +149,7 @@ reachable by walking link edges outward from an app (`input_test` depends on
 `input`, not the reverse). `--with-tests` adds them:
 
 ```sh
-python3 tools/extract_closure.py guess --with-tests --verify   # --verify also runs ctest
+python3 ../../tools/extract_closure.py guess --with-tests --verify   # --verify also runs ctest
 ```
 
 `ctest --show-only=json-v1` is the authority for what counts as a test, and each

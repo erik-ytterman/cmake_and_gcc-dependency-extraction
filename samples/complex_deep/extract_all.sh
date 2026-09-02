@@ -2,15 +2,15 @@
 # extract_all.sh -- configure the complex_deep fixture once, then extract every
 # app and check what each one re-declares. Run from anywhere.
 #
-#   bash complex_deep/extract_all.sh [--verify]
+#   bash samples/complex_deep/extract_all.sh [--verify]
 #
 # --verify also builds (and tests) each extracted tree; that re-fetches fmt and
 # nlohmann_json per app, so it takes a few minutes.
 
 set -euo pipefail
-cd "$(dirname "$0")/.."          # repo root
+cd "$(dirname "$0")/../.."       # repo root
 
-SRC=complex_deep
+SRC=samples/complex_deep
 BUILD=$SRC/build
 OUT=${TMPDIR:-/tmp}/cd-extracted
 VERIFY=${1:-}
