@@ -28,6 +28,8 @@ apps/
   tally/                  die-roll histogram   :         rng +       build_info
 tools/extract_closure.py  the extractor
 util/export_docs.py       render the Markdown docs to standalone HTML
+complex_deep/             a larger, separate fixture — deep library tree, several
+                          dependencies, an OBJECT library, a same-basename clash
 ```
 
 ## Dependency subsets

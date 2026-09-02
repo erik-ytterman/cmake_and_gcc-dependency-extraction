@@ -1,4 +1,4 @@
 /build/
 build*/
-/extracted/
+extracted/
 __pycache__/

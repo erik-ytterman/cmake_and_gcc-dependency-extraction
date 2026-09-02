@@ -888,6 +888,9 @@ The sample project is deliberately tiny. A real one has a dozen top-level
 executables, a first-party library tree several `add_subdirectory()` levels
 deep, and a handful of external dependencies fetched by CMake. This section is
 what changes — and, mostly, what does not — at that size.
+[`complex_deep/`](complex_deep/) is a second fixture built to that shape: a
+three-level library tree, `fmt` + `nlohmann_json` + `find_package(Threads)`, an
+`OBJECT` library, and a target with two same-basename sources.
 
 ### The pipeline is per-target, and most of it already scales
 
