@@ -75,11 +75,16 @@ How it works — it combines three sources of truth:
 2. **Per-translation-unit `.d` files** (`g++ -MMD`) — for each `.cpp` and
    everything it includes, the precise set of headers actually `#included`, so
    only headers on the real closure are copied.
-3. **`CMakeLists.txt` and the `.cmake` files it `include()`s** — every
-   `FetchContent_Declare(...)` block is copied verbatim into the extracted
-   `CMakeLists.txt`, so third-party deps stay as FetchContent (not vendored) and
-   the tree remains standalone yet minimal. `--deps-file <glob>` adds files the
-   `include()` chain misses.
+3. **The CMake command trace** — the extractor re-runs configure under
+   `--trace-expand --trace-format=json-v1` and reads back every
+   `FetchContent_Declare`, `find_package` and `target_link_libraries` the
+   project's own CMake ran, with arguments already variable-expanded. Each
+   `FetchContent_Declare` block is regenerated into the extracted `CMakeLists.txt`
+   (so third-party code stays fetched, not vendored); each `find_package` call is
+   re-emitted verbatim (the host toolchain provides it); each executable's link
+   line is built from the traced `target_link_libraries`. `--deps-file <glob>`
+   text-scans extra files for the rare declaration the trace never reaches. Needs
+   CMake ≥ 3.21.
 
 Because the apps touch different library subsets, the extracted trees differ:
 `roller` contains no `input`, `greeter` contains no `rng`.
@@ -142,7 +147,7 @@ note: skipping test 'rng_test' -- it needs rng, not in greeter's closure
 | greeter | `input_test`           |
 | tally   | `rng_test`             |
 
-Since the libraries are flattened away, each test compiles the library sources
+Since the libraries are folded in, each test compiles the library sources
 it used to link; the emitted `CMakeLists.txt` gains `enable_testing()`, one
 `add_executable()` per test, and an `add_test()` preserving the registered name.
 This upgrades `--verify` from "compiles standalone" to "passes standalone".

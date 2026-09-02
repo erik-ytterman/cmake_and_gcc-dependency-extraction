@@ -13,7 +13,7 @@ between.
 The goal of the whole pipeline: given one application target `T`, produce a flat,
 standalone, buildable directory containing exactly `T`'s minimal build closure
 (first-party sources + headers + generated code), with third-party dependencies
-kept as FetchContent declarations rather than copied.
+re-declared rather than copied.
 
 ## The running example
 
@@ -38,38 +38,44 @@ Before it runs:
 - The build was compiled with `-MMD` so a per-translation-unit `.d` header
   dependency file sits next to every object file under
   `build/**/CMakeFiles/<target>.dir/`.
+- CMake is 3.21 or newer (Stage 1 re-runs configure under `--trace-redirect`).
 
 No source file is ever parsed by hand; every fact comes from CMake or the
 compiler.
 
 ## Execution order at a glance
 
+The extractor consumes four facts the configured build already produced: the
+File API codemodel, the command trace, the `-MMD` `*.o.d` depfiles, and the CTest
+registry.
+
 ```
-                        ┌─ Stage 1   load_codemodel ────── CMake File API reply
-  build/       ────────▶│  Stage 2   load_targets ──────── by_id / name_to_id / dir_of
-  src/         ────────▶│  Stage 3   gather_fetchcontent ─ fetch{}   (CMakeLists.txt + include()s)
-  -MMD *.o.d   ────────▶│  Stage 4   external_regions ──── regions{}  (third-party dirs)
-  CMakeLists.txt ──────▶│  Stage 5   transitive_closure ── closure of target ids
-  ctest registry ─────▶ │  Stage 6   classify ──────────── first_party[] / externals[]
-                        │  Stage 7   select_tests * ────── tests[]
-                        │  Stage 8   (include roots) ───── src/gen include roots, cxx_std
-                        │  Stage 9   collect_sources ───── all_sources
-                        │  Stage 10  parse_depfile ─────── headers
-                        │  Stage 11  collision-check + layout  extracted/<T>/{src,include,generated}
-                        │  Stage 12  write_cmakelists ──── extracted/<T>/CMakeLists.txt
-                        │  Stage 13  write_readme ──────── extracted/<T>/README.md
-                        └─ Stage 14  verify_build * ────── extracted/<T>/build/  (built + green)
-                                          * Stage 7 needs --with-tests, Stage 14 needs --verify
+  Stage 1   load_codemodel ────── File API reply + command trace
+  Stage 2   load_targets ──────── by_id / name_to_id / dir_of
+  Stage 3   load_trace ────────── fetch{} / find_pkgs{} / link_tokens{}
+  Stage 4   external_regions ──── regions{}  (third-party directories)
+  Stage 5   transitive_closure ── closure of target ids
+  Stage 6   classify ──────────── first_party[] / externals[]
+  Stage 7   select_tests * ────── tests[]
+  Stage 8   (include roots) ───── source / generated include roots, cxx_std
+  Stage 9   collect_sources ───── all_sources
+  Stage 10  parse_depfile ─────── headers
+  Stage 11  collision-check + layout  extracted/<T>/{src,include,generated}
+  Stage 12  write_cmakelists ──── extracted/<T>/CMakeLists.txt
+  Stage 13  write_readme ──────── extracted/<T>/README.md
+  Stage 14  verify_build * ────── extracted/<T>/build/  (built + green)
+
+  * Stage 7 needs --with-tests, Stage 14 needs --verify
 ```
 
 | Stage | Function | Turns … | … into |
 |------:|----------|---------|--------|
-| 1  | `load_codemodel()`        | the build dir | the File API codemodel JSON |
+| 1  | `load_codemodel()`        | the build dir | the File API codemodel + the command trace |
 | 2  | `load_targets()`          | the codemodel | per-target JSON + lookup maps |
-| 3  | `gather_fetchcontent()` + `parse_fetchcontent()` | `CMakeLists.txt` + its `include()`s | the `FetchContent_Declare` blocks |
+| 3  | `load_trace()` + `gather_fetchcontent()` / `traced_find_packages()` / `traced_link_tokens()` | the command trace | `FetchContent_Declare` blocks, `find_package()` calls, per-target link tokens |
 | 4  | `external_regions()`      | the directory tree | third-party dirs → owning dependency |
 | 5  | `transitive_closure()`    | the root target id | every target id it links |
-| 6  | `classify()`              | that closure | first-party targets vs external names |
+| 6  | `classify()`              | that closure | first-party targets vs third-party names |
 | 7  | `ctest_registry()` + `select_tests()` | the CTest registry | the covering tests to carry over |
 | 8  | inline in `extract()`     | the compile groups | include roots + C++ standard |
 | 9  | `collect_sources()`       | target `sources[]` | the `.cpp` files to copy |
@@ -81,13 +87,16 @@ compiler.
 
 ---
 
-## Stage 1 — Load the CMake File API codemodel
+## Stage 1 — Load the codemodel and the command trace
 
 **Function:** `load_codemodel()`
 
-**Purpose:** Obtain a machine-readable, authoritative description of every target
-and every link edge between them. This is the ground truth for "what does `T`
-depend on", replacing fragile parsing of `CMakeLists.txt` or Graphviz output.
+**Purpose:** Obtain two machine-readable, authoritative accounts of the configured
+build: the **File API codemodel** (every target and every link edge — the ground
+truth for "what does `T` depend on") and the **command trace** (every CMake
+command that ran, with its arguments — the ground truth for the dependency
+declarations). Both replace fragile parsing of `CMakeLists.txt` or Graphviz
+output.
 
 **Input:** the build directory.
 
@@ -95,10 +104,12 @@ depend on", replacing fragile parsing of `CMakeLists.txt` or Graphviz output.
 build/
 ```
 
-**Output:** `(reply_dir, codemodel)`.
+**Output:** `(reply_dir, codemodel, trace_file)`.
 
 ```
-reply_dir = …/build/.cmake/api/v1/reply/
+reply_dir  = …/build/.cmake/api/v1/reply/
+trace_file = …/build/.cmake/extract-trace.json   (the command trace: JSON,
+                                                  one trace record per line)
 
 codemodel = {
   "paths": { "source": "…", "build": "…/build" },
@@ -112,10 +123,14 @@ codemodel = {
 **Algorithm:**
 1. Create the query stub `build/.cmake/api/v1/query/codemodel-v2` — an empty file
    whose *name* requests the codemodel object, version 2.
-2. Run `cmake <build>` — a no-op reconfigure against the existing cache. Because
-   the query now exists, CMake writes a reply under
-   `build/.cmake/api/v1/reply/`. (This does not re-fetch `fmt`; it is already
-   populated.)
+2. Run `cmake <build> --trace-expand --trace-format=json-v1
+   --trace-redirect=<trace_file>` — a no-op reconfigure against the existing
+   cache. Because the query now exists, CMake writes a reply under
+   `build/.cmake/api/v1/reply/`; the trace flags additionally write one trace
+   record per command invocation (arguments already variable-expanded) to
+   `trace_file`. (This does not re-fetch `fmt`; it is already populated. A no-op
+   reconfigure still re-runs every `CMakeLists.txt`, so the trace is complete
+   each time.)
 3. Read the newest `index-*.json`, find the object whose `kind == "codemodel"`,
    and load the JSON file it points to.
 
@@ -158,51 +173,75 @@ a closure.
 
 ---
 
-## Stage 3 — Parse the FetchContent declarations
+## Stage 3 — Recover the third-party dependencies from the command trace
 
-**Function:** `gather_fetchcontent()`, then `parse_fetchcontent()`
+**Function:** `load_trace()`, then `gather_fetchcontent()`,
+`traced_find_packages()`, `traced_link_tokens()`
 
-**Purpose:** Capture, verbatim, every third-party dependency block so the emitted
-`CMakeLists.txt` can reproduce it exactly — same repo, same pinned tag — instead
-of copying the dependency's code.
+**Purpose:** Learn every third-party dependency the project actually pulls in, and
+how each target links it, so the emitted `CMakeLists.txt` can reproduce the
+dependency setup — same repo, same pinned tag, same `find_package()` call — without
+copying the dependency's code.
 
-**Input:** the top-level `CMakeLists.txt`, every file it transitively
-`include()`s, and any `--deps-file` globs.
+**Input:** the command trace from Stage 1. Each trace record is one command CMake
+ran, as `{"cmd", "args", "file", "line"}`:
 
-```cmake
-FetchContent_Declare(
-  fmt
-  GIT_REPOSITORY https://github.com/fmtlib/fmt.git
-  GIT_TAG        10.2.1
-  GIT_SHALLOW    TRUE
-)
-FetchContent_MakeAvailable(fmt)
+```json
+{"cmd":"FetchContent_Declare","args":["fmt","GIT_REPOSITORY","https://github.com/fmtlib/fmt.git","GIT_TAG","10.2.1","GIT_SHALLOW","TRUE"],"file":".../CMakeLists.txt","line":12}
+{"cmd":"target_link_libraries","args":["guess","PRIVATE","input","rng","fmt::fmt","build_info"],"file":".../apps/guess/CMakeLists.txt","line":2}
+{"cmd":"find_package","args":["Threads","REQUIRED"],"file":".../CMakeLists.txt","line":4}
 ```
 
-**Output:** `fetch` — declared name → block text + default link alias.
+`args` arrives already variable-expanded, with every `if()` / `foreach()` /
+`function()` resolved, so `FetchContent_Declare(${dep} ...)`, a declaration inside
+a wrapper function, and the `FetchContent_Declare` calls CPM and similar wrappers
+synthesise internally are all visible — none of which a text scan of
+`CMakeLists.txt` can follow.
+
+**Output:** three structures.
 
 ```python
-{
+fetch = {                         # one entry per FetchContent dependency
   "fmt": {
     "block": "FetchContent_Declare(\n  fmt\n  GIT_REPOSITORY https://github.com/fmtlib/fmt.git\n"
-             "  GIT_TAG        10.2.1\n  GIT_SHALLOW    TRUE\n)",
-    "link":  "fmt::fmt",
+             "  GIT_TAG 10.2.1\n  GIT_SHALLOW TRUE\n)",   # regenerated from args
+    "link":  "fmt::fmt",                                  # imported-target name (fallback)
   }
 }
+find_pkgs   = { "Threads": "find_package(Threads REQUIRED)" }   # re-emitted verbatim
+link_tokens = { "guess": ["input", "rng", "fmt::fmt", "build_info"], ... }
 ```
 
-**Algorithm:** `gather_fetchcontent()` reads `CMakeLists.txt`, follows each
-`include(<arg>)` it can resolve to a file (a path relative to the including file
-or the source root, or a `cmake/<Module>` name; a still-variable path is
-skipped, not guessed), and also reads any `--deps-file` globs — then concatenates
-the lot. `parse_fetchcontent()` regex-scans that text for `FetchContent_Declare(
-<name> … )` blocks (`FetchContent_Declare\s*\(\s*(\w+)(.*?)\n\)`, dotall) and
-stores each block unmodified plus a conventional alias `<name>::<name>`.
-Over-collecting is harmless: a declaration whose name never lands in the closure
-is never emitted (Stage 12).
+**Algorithm:**
+- `load_trace()` reads the trace, skips the `{"version": ...}` header line, and
+  keeps only `FetchContent_Declare` / `find_package` / `target_link_libraries`
+  records (command names matched case-insensitively).
+- A record is kept only when it comes from **the project's own CMake code** — its
+  `file` is under the source root and outside every third-party region (Stage 4).
+  Records from CMake's bundled modules (`find_package(Git)` inside
+  `FetchContent.cmake`) or from a dependency's own `CMakeLists.txt` are dropped.
+- `gather_fetchcontent()` **regenerates** a `FetchContent_Declare(...)` block from
+  each kept declaration's argument list — one `KEYWORD value...` group per line.
+  Formatting and comments from the original are lost; the arguments are exactly
+  what CMake received. The conventional imported-target name `<name>::<name>` is
+  stored as a link-line fallback.
+- `traced_find_packages()` **re-emits** each kept `find_package()` call verbatim.
+  The extracted tree cannot recreate these — the host toolchain must provide them
+  — but the call is kept so the build stays honest about what it needs.
+- `traced_link_tokens()` records, per target, its **link tokens**: the libraries
+  it names in `target_link_libraries()` (keywords like `PRIVATE` removed),
+  accumulated across every call. Calls on a name that is not a known project
+  target are ignored, which drops `try_compile()`'s scratch targets.
 
-**Note:** this runs *before* the closure walk because both Stage 4 (region
-mapping) and Stage 6 (partition) need `fetch` to recognise a dependency.
+**`--deps-file`:** a rarely-needed escape hatch. The globbed files are
+text-scanned by `parse_fetchcontent()` (regex `FetchContent_Declare\s*\(\s*(\w+)
+(.*?)\n\)`, dotall) and merged into `fetch`. Use it only for a declaration
+guarded behind an `if()` the trace never enters.
+
+**Note:** the FetchContent *names* are collected first (without the region
+filter) because Stage 4 needs them before regions exist; the blocks, the
+`find_package` calls and the link tokens are then filtered against the regions
+Stage 4 produces.
 
 ---
 
@@ -215,8 +254,8 @@ query it in later stages.
 occupies, so no later stage can ever copy from them. This is what keeps `_deps/`
 out of the extracted tree.
 
-**Input:** the codemodel `directories[]`, plus `by_id`, `dir_of`, `fetch`,
-`top_source`, `top_build`.
+**Input:** the codemodel `directories[]`, plus `by_id`, `dir_of`, the set of
+declared FetchContent names, `top_source`, `top_build`.
 
 ```
 directories[]:
@@ -307,11 +346,12 @@ Two things this traversal deliberately does *not* reach:
 **Function:** `classify()`
 
 **Purpose:** Decide which closure members get their code copied (first-party) and
-which get re-declared as external dependencies (third-party).
+which get re-declared (third-party).
 
 **Input:** the closure ids, `by_id`, `regions`, `fetch`, `top_source`.
 
-**Output:** `first_party` (target JSONs) and `externals` (declaration names).
+**Output:** `first_party` (target JSONs) and `externals` (the third-party
+dependency names — the list is named `externals` in the code).
 
 ```python
 first_party = [ <guess JSON>, <input JSON>, <rng JSON> ]   # sorted by id
@@ -321,9 +361,9 @@ externals   = [ "fmt" ]
 **Algorithm:** For each closure target, look at the directory its own source
 lives in:
 
-- `region_owner(<target source dir>)` is set → **external**, owned by that name
-  (`fmt`'s source dir is `…/build/_deps/fmt-src`, a region root);
-- else the target `name` is a declared FetchContent name → **external**
+- `region_owner(<target source dir>)` is set → **third-party**, owned by that
+  name (`fmt`'s source dir is `…/build/_deps/fmt-src`, a region root);
+- else the target `name` is a declared FetchContent name → **third-party**
   (fallback for a dependency declared but not yet populated);
 - else → **first-party** (`guess`, `input`, `rng`).
 
@@ -473,10 +513,10 @@ and collisions avoided.
 
 `collect_sources()` is called once over the app's `first_party`, then once per
 carried-over test over *that test's* first-party closure. A test's list therefore
-includes the library `.cpp` files it used to link — necessary because Stage 11
-flattens the libraries away, leaving no `input` target for a test to link
-against. Those library sources are already in `all_sources`, so nothing extra is
-copied; only the per-target compile lists differ.
+includes the library `.cpp` files it used to link — necessary because the
+libraries are folded in, leaving no `input` target for a test to link against.
+Those library sources are already in `all_sources`, so nothing extra is copied;
+only the per-target compile lists differ.
 
 ---
 
@@ -520,7 +560,7 @@ duplicates collapse.)
 1. For each contributing target, glob
    `build/**/CMakeFiles/<name>.dir/**/*.o.d`. The match is `*.o.d`, not `*.d`:
    CMake ≥ 4.0 also writes a link-step depfile `link.d` into the same `.dir/`,
-   listing object files and libraries rather than headers (TUTORIAL.md Trap 5).
+   listing object files and libraries rather than headers (TUTORIAL.md Trap 6).
 2. `parse_depfile()` reads the Make-syntax file: join `\`-newline continuations,
    drop the target before the first `:`, split the rest on whitespace.
 3. Resolve each prerequisite to an absolute path and drop sources
@@ -604,8 +644,9 @@ headers).
 parent project.
 
 **Input:** the target name, `cxx_std`, `cmake_sources`, the `used_include` /
-`used_generated` flags, `fetch`, the union of external names (app + every carried
-test), and the `tests` records.
+`used_generated` flags, `fetch`, the FetchContent names to declare, the
+`find_package(...)` calls to re-emit, `link_lines` (the link line for each
+executable), and the `tests` records.
 
 **Output:** `extracted/guess/CMakeLists.txt`.
 
@@ -620,8 +661,8 @@ include(FetchContent)
 FetchContent_Declare(
   fmt
   GIT_REPOSITORY https://github.com/fmtlib/fmt.git
-  GIT_TAG        10.2.1
-  GIT_SHALLOW    TRUE
+  GIT_TAG 10.2.1
+  GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(fmt)
 
@@ -654,24 +695,35 @@ add_test(NAME rng_test COMMAND rng_test)
 **Algorithm:** Assemble the file textually:
 1. `cmake_minimum_required` + `project(<T>_standalone)` + the captured C++
    standard.
-2. If there are externals: `include(FetchContent)`, then each captured
-   `FetchContent_Declare(...)` block *verbatim*, then one
-   `FetchContent_MakeAvailable(<names>)`. The name set is the union of the app's
-   externals and every carried-over test's, since a test may use a dependency the
-   app does not.
-3. `add_executable(<T> …)` over `cmake_sources`, then
+2. If there are `find_package` dependencies: each `find_package(...)` call
+   *verbatim*, under a comment noting the host toolchain must provide them.
+3. If there are FetchContent dependencies: `include(FetchContent)`, then each
+   regenerated `FetchContent_Declare(...)` block, then one
+   `FetchContent_MakeAvailable(<names>)`. The name set is the union of every
+   dependency reachable in the target graph from the app or a carried-over test,
+   plus any named on a link line.
+4. `add_executable(<T> …)` over `cmake_sources`, then
    `target_include_directories(<T> PRIVATE include generated)` — only the dirs
    that actually received files — then `target_link_libraries(<T> PRIVATE …)`
-   linking each external via its `<name>::<name>` alias.
-4. If tests were carried over: `enable_testing()`, then for each test the same
-   executable triple with *its own* source list and *its own* externals, followed
+   from `link_lines[<T>]`.
+5. If tests were carried over: `enable_testing()`, then for each test the same
+   executable triple with *its own* source list and *its own* link line, followed
    by `add_test(NAME <registered name> COMMAND <target>)`.
 
-**Note on per-test externals:** `input_test` gets
-`target_link_libraries(input_test PRIVATE fmt::fmt)` because `input` links `fmt`;
-`rng_test` gets no `target_link_libraries` at all because nothing in its closure
-reaches `fmt`. The registered CTest name is preserved even where it differs from
-the target name.
+**How a link line is built (inline in `extract()`):** the first-party libraries
+are folded into the executable, so every link edge they carried to a third-party
+dependency has to be re-homed onto the executable. For each executable, walk it
+*and* every first-party library folded into it, and keep each link token whose
+base name (before `::`) is a FetchContent or a `find_package` dependency. A
+FetchContent dependency that is in the target graph but that no link token
+happened to name (linked through a generator expression, say) still gets its
+`<name>::<name>` imported-target name, as a safety net.
+
+**Worked example:** `input_test` gets
+`target_link_libraries(input_test PRIVATE fmt::fmt)` because `input`, folded into
+it, links `fmt::fmt`; `rng_test` gets no `target_link_libraries` at all because
+nothing folded into it links a third-party dependency. The registered CTest name
+is preserved even where it differs from the target name.
 
 ---
 
@@ -682,8 +734,8 @@ the target name.
 **Purpose:** Leave a short human description of what the extracted tree is and how
 to build it.
 
-**Input:** the target name, the `first_party` list, the external names, the
-`tests` records.
+**Input:** the target name, the `first_party` list, the FetchContent names, the
+`find_package` names, the `tests` records.
 
 **Output:** `extracted/guess/README.md`.
 
@@ -693,7 +745,7 @@ to build it.
 Minimal build closure for `guess`, extracted from the parent CMake project into a flat, standalone tree.
 
 - First-party targets folded in: guess, input, rng
-- Third-party deps (via FetchContent): fmt
+- Third-party dependencies (via FetchContent): fmt
 - Tests carried over: input_test, rng_test
 
 ## Build
@@ -709,6 +761,9 @@ cmake --build build -j
 ctest --test-dir build
 ```
 ~~~
+
+A `find_package` dependency, when there is one, adds a
+`Provided by the host toolchain (find_package): …` line to the list.
 
 ---
 
@@ -752,8 +807,10 @@ that came along for the ride.
   tree is identical with or without the flag.
 - **Standalone** — first-party code is copied with its include structure intact
   (Stage 11), generated code is frozen in place (Stages 10, 11), and third-party
-  code is reproduced through the project's own FetchContent declarations
-  (Stages 3, 4, 12). Nothing points back at the parent repo. When a target has no
+  code is reproduced from the commands the project actually ran — a regenerated
+  `FetchContent_Declare`, a re-emitted `find_package`, and link lines built from
+  the traced `target_link_libraries` (Stages 3, 4, 12). Nothing points back at
+  the parent repo. When a target has no
   third-party dependency at all (`tally`), Stage 12 emits neither the FetchContent
   section nor any `target_link_libraries`, and the extracted tree then configures
   and builds with no network access whatsoever.

@@ -6,7 +6,7 @@ shrink a build — and want to understand *how* to do that reliably rather than 
 hand-copying files until it compiles.
 
 **What you'll learn:** which tools can tell you the truth about a build, how to
-query them, and the five traps that make a naive implementation quietly wrong.
+query them, and the six traps that make a naive implementation quietly wrong.
 
 **The three docs in this repo:**
 
@@ -71,8 +71,9 @@ Extraction is graph work, so the standard terms are used precisely.
 | **Compile group** | A set of a target's sources that share compile settings — language, include directories, defines, standard (`compileGroups[]` in the codemodel). |
 | **Generator expression** | CMake's `$<...>` syntax, evaluated at *generate* time rather than when the `CMakeLists.txt` is read. One of the reasons that file cannot simply be parsed. |
 | **INTERFACE library** | A target that compiles nothing and exists only to carry usage requirements to whatever links it. `build_info` is one. Absent from `dependencies[]` — see Trap 2. |
-| **Imported target** | A target standing in for something built outside this project, e.g. produced by `find_package()`. |
+| **Imported target** | A target standing in for something built outside this project, e.g. produced by `find_package()`. Conventionally namespaced (`fmt::fmt`, `Threads::Threads`) — the **imported-target name** is what you pass to `target_link_libraries()`. |
 | **FetchContent** | CMake's dependency fetcher: `FetchContent_Declare(<name> GIT_REPOSITORY … GIT_TAG …)` plus `FetchContent_MakeAvailable(<name>)` clones a pinned external at configure time and adds it via `add_subdirectory()`. `fmt` comes in this way. |
+| **Command trace** | The log CMake writes under `--trace-expand --trace-format=json-v1`: one **trace record** (`{"cmd", "args", "file", "line"}`) per command it runs, with every argument already variable-expanded. Stage 1 captures it; Stage 3 reads the dependency setup out of it. |
 | **CTest** | CMake's test runner. `ctest --show-only=json-v1` reports the **registered tests** — those an `add_test()` call created — and their commands. |
 | **Generated code** | Sources or headers produced during the build rather than committed — here `build_info.hpp`, which `configure_file()` fills in from a `.in` template. The extractor freezes it into the tree as a plain file. |
 | **In-source / out-of-source build** | Whether the build directory sits inside the source tree (`./build/`, this project's default) or outside it. See Trap 3. |
@@ -83,8 +84,10 @@ Extraction is graph work, so the standard terms are used precisely.
 |---|---|
 | **Translation unit (TU)** | One source file *plus every header it includes*, as the compiler sees it after preprocessing. One `.cpp` → one TU → one object file → one depfile. Per-TU facts are precise because the compiler actually computed them. |
 | **Depfile** (`.d` file) | A small Makefile-syntax file the compiler writes next to each object file, listing that TU's header closure. Produced by `-MMD`. |
-| **Dependency boundary** | The line between code the extractor **copies** (first-party) and code it **re-declares** so the tree re-fetches it (third-party). Drawn from the project's own `FetchContent_Declare` blocks, never from a path pattern. See section 3. |
-| **First-party / third-party** | Code the project owns versus code it pulls in from outside. |
+| **Dependency boundary** | The line between code the extractor **copies** (first-party) and code it **re-declares** (third-party) — a regenerated `FetchContent_Declare`, or a re-emitted `find_package()`. Drawn from the command trace, never from a path pattern. See section 3. |
+| **First-party / third-party** | Code the project owns versus code it pulls in from outside. "Third-party" and "external" are used interchangeably; the code calls the list `externals`. |
+| **Fold in / flatten** | Two distinct moves. A first-party library is **folded into** its consumer: the library target is dropped and its sources compile straight into the executable (and each carried-over test). Separately, the source *directory layout* is **flattened**: every source lands at `src/<origin>/<basename>`, one level deep. |
+| **Link line / link token** | The `target_link_libraries(<exe> PRIVATE …)` the extractor emits for one executable is its **link line**; each entry in it (`fmt::fmt`, `input`) is a **link token**. Stage 3 reads the source project's link tokens from the trace. |
 | **Ground truth** | A fact recorded by the tool that did the work (CMake, the compiler), as opposed to one re-derived by inspecting files afterwards. The whole design prefers the former. |
 | **Extractor / extracted tree** | `tools/extract_closure.py`, and the flat, standalone directory it writes to `extracted/<target>/`. |
 | **POC** | Proof of concept. This repo demonstrates the approach rather than being production-hardened. |
@@ -153,9 +156,9 @@ that, and the five facts below are why this tool has the shape it does.
 4. **A library is a bag of object files.** A static library (`.a`) is just its
    `.o` files collected together; the *linker* copies the pieces an executable
    actually references into that executable. Afterwards nothing is resolved at
-   run time — the binary is self-contained. This is why the extractor can
-   "flatten a library away": copy its sources in and let the one build compile
-   them.
+   run time — the binary is self-contained. This is why the extractor can **fold
+   a library into** its consumer: drop the library target, copy its sources in,
+   and let the one build compile them.
 5. **The build has no manifest.** Neither the binary nor the object files record
    which targets link which, or which headers a source needs. The only
    machine-readable answer is what CMake and the compiler emit *while building* —
@@ -206,7 +209,7 @@ the compiler already computed.** Ask them.
 |---|---|---|
 | CMake File API codemodel | What targets exist, what links what, what compiles what | The **target graph** |
 | Compiler depfiles (`-MMD`) | Which headers did this translation unit *actually* include | The **header closure** |
-| The project's own `FetchContent_Declare` | What is third-party, and pinned to what | The **dependency boundary** |
+| The command trace (`FetchContent_Declare`, `find_package`, `target_link_libraries` records) | What is third-party, pinned to what, and linked how | The **dependency boundary** |
 
 Plus one more for tests: `ctest --show-only=json-v1` — the authority on what is
 actually a registered test.
@@ -254,9 +257,10 @@ the preprocessor. `-MMD` is how you ask (Lab 2).
 The line between code you **copy** and code you **re-declare**.
 
 First-party code is copied into the extracted tree. Third-party code is not —
-instead the project's own dependency declaration is reproduced, so the standalone
-tree re-fetches the same pinned version the parent built against. That is what
-keeps the result both self-contained and small: you get `fmt` 10.2.1 without
+instead the project's own dependency setup is reproduced: a `FetchContent_Declare`
+is regenerated so the standalone tree re-fetches the same pinned version, and a
+`find_package()` call is re-emitted so the host toolchain supplies it. That is
+what keeps the result both self-contained and small: you get `fmt` 10.2.1 without
 carrying a copy of `fmt` around.
 
 Drawing this line wrong is costly in both directions. Put the boundary too far
@@ -265,11 +269,11 @@ exactly Trap 1, and it built fine while being wrong. Put it too far in and the
 extracted tree does not build at all, because code you assumed was external is
 declared nowhere.
 
-The authority has to be the project's *own* declarations — here
-`FetchContent_Declare` — for two reasons: they are the only statement of what
-this project considers external, and they carry the version pin that has to
-travel with the extraction. Lab 3 shows how to turn those declarations into a
-test you can apply to any file.
+The authority has to be the commands the project *actually ran* — read from the
+command trace — for two reasons: they are the only statement of what this project
+considers third-party, and they carry the version pin (and the exact
+imported-target name) that has to travel with the extraction. Lab 3 shows how to
+turn those into a test you can apply to any file.
 
 ---
 
@@ -534,7 +538,7 @@ collect into a set.
 > also writes a *link-step* depfile named `link.d` into the same
 > `CMakeFiles/<target>.dir/`, which lists object files and libraries, not
 > headers. Collect the per-TU depfiles by matching `*.o.d`, not `*.d` — see
-> Trap 5 in [section 8](#8-the-five-traps).
+> Trap 6 in [section 8](#8-the-six-traps).
 
 ### The subtlety worth internalizing
 
@@ -564,24 +568,32 @@ directory happened to be passed. You need a separate authority — Lab 3.
 ## 6. Lab 3 — The dependency boundary
 
 To keep the extracted tree *standalone but not bloated*, third-party code is not
-copied at all. Instead the project's own `FetchContent_Declare` block is lifted
-verbatim into the generated `CMakeLists.txt`:
+copied at all. Instead the project's own dependency setup is reproduced in the
+generated `CMakeLists.txt` — and the source for that is the **command trace**,
+which records every command CMake ran with its arguments already
+variable-expanded:
 
-```cmake
-FetchContent_Declare(
-  fmt
-  GIT_REPOSITORY https://github.com/fmtlib/fmt.git
-  GIT_TAG        10.2.1
-  GIT_SHALLOW    TRUE
-)
+```sh
+cmake build --trace-expand --trace-format=json-v1 --trace-redirect=trace.json
+grep -E '"FetchContent_Declare"|"find_package"|"target_link_libraries"' trace.json
 ```
 
-`FetchContent` clones the dependency's *source* at configure time and compiles
-it as part of your build — there is no prebuilt package and no central registry
-in play. So reproducing the declaration is all the extracted tree needs: run its
-configure step and `fmt` is fetched and built again, at the same pinned tag. The
-pin travels with the extraction, so the standalone tree builds against the same
-version the parent did — without vendoring a snapshot that will rot.
+```json
+{"cmd":"FetchContent_Declare","args":["fmt","GIT_REPOSITORY","https://github.com/fmtlib/fmt.git","GIT_TAG","10.2.1","GIT_SHALLOW","TRUE"],"file":".../CMakeLists.txt","line":12}
+{"cmd":"target_link_libraries","args":["input","PUBLIC","fmt::fmt"],"file":".../libs/input/CMakeLists.txt","line":3}
+```
+
+From the `FetchContent_Declare` record the extractor regenerates the block; from
+the `target_link_libraries` records it reads the link tokens — it learns that
+`input` links `fmt::fmt`, so after `input` is folded into the app the app still
+links it. A `find_package(...)` call is re-emitted verbatim — the tree cannot
+recreate it, but the host toolchain can.
+
+Why the trace and not a `grep` of `CMakeLists.txt`? Because the trace follows
+`FetchContent_Declare(${dep} ...)`, a declaration inside a wrapper function or a
+loop, and the calls that `CPM.cmake` and similar tools synthesise internally —
+none of which a text scan can see. It also only reports commands that *ran*, so a
+declaration behind a false `if()` is correctly absent.
 
 That leaves one question: **which files are third-party?** The answer must not be
 a path heuristic, because `_deps/` is a default that projects override, and it
@@ -642,7 +654,8 @@ it, and a test target can be named anything at all.
 ```
    codemodel ──▶ which targets, which sources, which include roots
    depfiles  ──▶ which headers, exactly
-   directory tree + FetchContent ──▶ where the third-party boundary is
+   directory tree ──▶ where the third-party boundary is
+   command trace ──▶ how each third-party dependency is declared and linked
    ctest json ──▶ which tests cover the extracted code
                               │
                               ▼
@@ -686,7 +699,7 @@ Stage-by-stage detail is in [ALGORITHM.md](ALGORITHM.md).
 
 ---
 
-## 8. The five traps
+## 8. The six traps
 
 These are the ones this project actually hit. Each is a case where the naive
 implementation *looks* right and produces a tree that builds.
@@ -750,11 +763,24 @@ tests need a separate discovery pass (`--with-tests`).
 When you add one, keep minimality: carry a test over only if every first-party
 target it links is *already* in the app's closure. Otherwise a test drags in a
 library the app never used, and the "minimal closure" claim quietly stops being
-true. And since the libraries have been flattened away, a carried-over test must
+true. And since the libraries are folded into the test, a carried-over test must
 compile the library sources it used to link — there is no `input` target left for
 it to link against.
 
-### Trap 5 — not every `.d` file in a target dir is a compiler depfile
+### Trap 5 — the trace sees the dependencies' commands too
+
+The command trace records *every* command — including the `FetchContent_Declare`
+that `fmt`'s own `CMakeLists.txt` might run for its sub-dependency, and the
+`find_package(Git)` that `FetchContent.cmake` runs internally. Re-emitting those
+into the extracted tree would be wrong: `fmt` re-declares its own dependencies
+when it is fetched, and `Git` is not something the extracted app links.
+
+**Fix:** keep a trace record only when its `file` is under the source root **and**
+outside every third-party region (Stage 4). That is the same region map that
+keeps `_deps/` out of the copied files, reused to keep dependency-internal
+commands out of the generated `CMakeLists.txt`.
+
+### Trap 6 — not every `.d` file in a target dir is a compiler depfile
 
 Stage 10 finds the header closure by globbing the `.d` files under each target's
 `CMakeFiles/<target>.dir/`. Every `.d` there is a per-translation-unit depfile —
@@ -793,8 +819,8 @@ pin it to the shape you actually mean.
    contain no `FetchContent` block even with `--with-tests`?
 3. You add a header to a library but no source `#include`s it. Does it appear in
    the extracted tree? Which stage decides?
-4. Your project uses `find_package(fmt)` instead of FetchContent. Which parts of
-   this pipeline break, and what would you replace them with?
+4. Your project uses `find_package(fmt CONFIG REQUIRED)` instead of FetchContent.
+   What does the extracted tree do with it, and what can it *not* guarantee?
 5. A test's command is a shell script that runs the binary. What happens in
    `ctest_registry()`, and is that the right behavior?
 
@@ -808,11 +834,12 @@ pin it to the shape you actually mean.
    through either reaches `fmt`.
 3. No. Stage 10 copies only what appears in a `.d` file, and an un-included header
    never reaches the preprocessor. This is exactly the minimality guarantee.
-4. `parse_fetchcontent()` finds nothing, so the dependency looks first-party and
-   its headers get copied. You would replace it with the `find_package()` calls
-   as the dependency boundary and emit those into the generated CMakeLists —
-   the *concept* (project's own declarations are the authority) is unchanged;
-   only the parser differs.
+4. The trace captures the `find_package(fmt CONFIG REQUIRED)` call and re-emits
+   it verbatim; `traced_link_tokens()` sees `fmt::fmt` on whatever links it, so
+   the link line is right. What it *cannot* guarantee: that the host has fmt
+   installed at all — unlike FetchContent, nothing fetches it — which is why the
+   extracted README lists it under "Provided by the host toolchain". The version
+   pin is only as strong as the `find_package` version argument.
 5. `command[0]` matches no target artifact, so the test is skipped. Right
    behavior: the extractor can only carry over tests it can rebuild from
    codemodel data, and silently emitting a broken `add_test()` would be worse.
@@ -826,13 +853,15 @@ pin it to the shape you actually mean.
 The short version, roughly in order of how often each one bites; §11 is the
 long version for a large multi-target repo.
 
+- [ ] **Use CMake ≥ 3.21.** Stage 1 re-runs configure with `--trace-redirect`
+      (added in 3.21) to capture the command trace.
 - [ ] **Turn on depfiles.** `-MMD` for GCC/Clang. MSVC has no direct equivalent;
       use `/showIncludes` and parse its output, or drive the closure from
       `compile_commands.json` plus a preprocessor pass.
-- [ ] **Check your dependency boundary.** `FetchContent_Declare` blocks outside
-      the top `CMakeLists.txt` are found if the file is `include()`d or named
-      with `--deps-file`. `find_package`, `vcpkg`, `conan` and git submodules
-      need a different Stage 4 — the concept holds, the parser changes (§11, §13).
+- [ ] **Check your dependency boundary.** The trace captures every
+      `FetchContent_Declare` and `find_package` that *runs*, wherever it lives —
+      no `--deps-file` needed unless a declaration is guarded behind a false
+      `if()`. `vcpkg`, `conan` and git submodules still need thought (§11, §13).
 - [ ] **Handle multi-config generators.** This POC reads
       `configurations[0]`. Ninja Multi-Config and Visual Studio have several —
       pick deliberately, or extract per configuration.
@@ -892,43 +921,44 @@ merge with no path conflicts (basename collisions aside — see below).
 
 ### Several FetchContent dependencies
 
-`gather_fetchcontent()` (Stage 3) scans the top `CMakeLists.txt` **and every
-file it transitively `include()`s**. A repo that keeps its dependencies in
-`cmake/Dependencies.cmake` and does `include(cmake/Dependencies)` is handled with
-no arguments. For anything the `include()` chain misses — a declaration inside a
-subdirectory's `CMakeLists.txt`, or a file pulled in by a macro — point at it:
+`load_trace()` (Stage 3) reads the command trace, so **every**
+`FetchContent_Declare` that actually runs is captured — in the top
+`CMakeLists.txt`, in an `include(cmake/Dependencies)` file, inside a subdirectory,
+inside a wrapper function, or synthesised by `CPM.cmake`. No arguments needed. The
+one gap is a declaration behind a false `if()` (it never runs, so it never
+traces); `--deps-file 'cmake/*.cmake'` text-scans extra files to cover that.
 
-```sh
-python3 tools/extract_closure.py app \
-    --deps-file 'cmake/*.cmake' --deps-file 'third_party/*/declare.cmake'
-```
-
-Globs are relative to `--src` and repeatable. Over-collecting is safe: a
-declaration whose name never lands in `app`'s closure is never emitted.
+The link line for each executable is built from the link tokens the trace
+recorded, so the real imported-target name (`GTest::gtest`, `Boost::headers`,
+`fmt::fmt-header-only`) is used, not a `<name>::<name>` guess — and a dependency
+pulled in only through a library's `PUBLIC` link interface is still linked after
+that library is folded in.
 
 What still needs a human:
 
-- **A dependency pulled in transitively by another dependency.** Its
-  `FetchContent_Declare` lives in *that* dependency's source, which the extractor
-  does not scan. If `app`'s closure links it directly, add its declaration by
-  hand (or `--deps-file` the fetched file once it exists).
+- **A dependency pulled in transitively by another dependency**, if your app's
+  closure links it *directly*. Its `FetchContent_Declare` runs inside that
+  dependency's own CMake code, which Stage 3 filters out (Trap 5). Add its
+  declaration by hand, or `--deps-file` the fetched file once it exists.
 - **`FETCHCONTENT_SOURCE_DIR_<NAME>` overrides / `FetchContent_Declare(... OVERRIDE_FIND_PACKAGE)`.**
-  The block is copied verbatim, so a local-path override travels with it and
-  will not resolve elsewhere. Strip those before shipping.
-- **The link alias.** The emitted `target_link_libraries` uses the convention
-  `<name>::<name>`. Where a dependency's real alias differs (`GTest::gtest`,
-  `Boost::headers`), fix it by hand — the codemodel's `linkLibraries[]` (§4)
-  resolves to the target whose `name` is the alias to use.
+  The block is regenerated from the traced arguments, so a local-path override
+  travels with it and will not resolve elsewhere. Strip those before shipping.
+- **Regenerated formatting.** The block is rebuilt from the argument list, one
+  `KEYWORD value` group per line — comments and alignment from the original are
+  gone. Cosmetic, but review the emitted `CMakeLists.txt` if that matters.
 
-### Non-FetchContent externals
+### Non-FetchContent dependencies
 
-A big repo usually also has `find_package()`, vcpkg, Conan, or vendored
-submodules. Stage 4 only understands FetchContent, so an executable that links
-`SQLite::SQLite3` gets a tree whose `CMakeLists.txt` omits that link and fails to
-build. The **§13 optional lab** turns the CMake 4.0 `link.d` into a check that
-catches exactly this — a linker input that is neither toolchain, nor `_deps/`,
-nor first-party is a dependency the boundary missed. Run that check before you
-trust an extracted tree from a repo with mixed dependency mechanisms.
+`find_package()` is handled: Stage 3 re-emits each call from the project's own
+CMake code verbatim, and the extracted README flags those as host-provided (the
+tree cannot fetch them). vcpkg and Conan mostly work *through* `find_package`, so
+they come out the same way — the toolchain file that made the packages findable
+does not travel, so document it. A vendored git submodule added with
+`add_subdirectory()` is a genuine gap: it has no declaration to re-emit and its
+code is outside the copied regions. The **§13 optional lab** turns the CMake 4.0
+`link.d` into a check that catches a linker input that is neither toolchain, nor
+`_deps/`, nor first-party — run it before trusting an extracted tree from a repo
+with mixed mechanisms.
 
 ### Sharp edges at scale, and where each one bites
 
@@ -997,13 +1027,13 @@ freely afterward.
 
 > **Optional, and not in `tools/test_tutorial.sh`.** This lab needs CMake ≥ 4.0
 > and illustrates a *diagnostic idea*, not baseline behavior. The extractor does
-> not use `link.d` today — Stage 10 only takes care to skip it (Trap 5). Read
+> not use `link.d` today — Stage 10 only takes care to skip it (Trap 6). Read
 > this if you are porting the pipeline to a project with dependencies that are
 > not FetchContent.
 
 ### What `link.d` is
 
-Trap 5 introduced it as a hazard: from CMake 4.0, the Makefile and Ninja
+Trap 6 introduced it as a hazard: from CMake 4.0, the Makefile and Ninja
 generators write a **link-step depfile** `link.d` next to each executable's
 per-TU depfiles, and a `*.d` glob will scoop it into the header closure by
 mistake. But turned around, `link.d` is a fourth build-produced fact — the
@@ -1097,11 +1127,12 @@ the "*nothing else*" promise from §1 applied in the other direction.
 
 ### Why it stays out of the baseline
 
-Two reasons. It needs CMake ≥ 4.0, while the project floor is 3.20 (§4) and
-`test_tutorial.sh` must pass on both. And it is a *diagnostic*, not a pipeline
-stage: `extract_closure.py` would use `link.d` only to emit warnings, never to
-decide what to copy — the three sources of truth in §3 already do that. Wiring it
-in as an optional extra pass alongside Stage 4 is left as an exercise.
+Two reasons. It needs CMake ≥ 4.0, while the extractor's floor is 3.21 (for the
+command trace's `--trace-redirect`) and `test_tutorial.sh` must pass on both. And
+it is a *diagnostic*, not a pipeline stage: `extract_closure.py` would use
+`link.d` only to emit warnings, never to decide what to copy — the three sources
+of truth in §3 already do that. Wiring it in as an optional extra pass alongside
+Stage 4 is left as an exercise.
 
 ---
 
@@ -1110,6 +1141,7 @@ in as an optional extra pass alongside Stage 4 is left as an exercise.
 | Tool / API | Invocation | Gives you | Since |
 |---|---|---|---|
 | File API codemodel | `touch <build>/.cmake/api/v1/query/codemodel-v2` then reconfigure | Targets, link edges, sources, include dirs, language standard, directory tree | CMake 3.14 |
+| Command trace | `cmake <build> --trace-expand --trace-format=json-v1 --trace-redirect=<file>` | Every command invocation with expanded args — `FetchContent_Declare`, `find_package`, `target_link_libraries`, … | json-v1 CMake 3.17; `--trace-redirect` 3.21 |
 | Compiler depfiles | `-MMD` (GCC/Clang) | Exact per-TU header closure, post-preprocessor | — |
 | CTest introspection | `ctest --show-only=json-v1` | Registered tests, their commands and properties | CMake 3.14 |
 | Compile database | `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` | Per-TU command lines — useful cross-check | CMake 3.5 |
