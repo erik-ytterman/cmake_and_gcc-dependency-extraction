@@ -86,7 +86,10 @@ Extraction is graph work, so the standard terms are used precisely.
 | **Depfile** (`.d` file) | A small Makefile-syntax file the compiler writes next to each object file, listing that TU's header closure. Produced by `-MMD`. |
 | **Dependency boundary** | The line between code the extractor **copies** (first-party) and code it **re-declares** (third-party) — a regenerated `FetchContent_Declare`, or a re-emitted `find_package()`. Drawn from the command trace, never from a path pattern. See section 3. |
 | **First-party / third-party** | Code the project owns versus code it pulls in from outside. "Third-party" and "external" are used interchangeably; the code calls the list `externals`. |
-| **Fold in** | A first-party library is **folded into** its consumer: the library target is dropped and its sources compile straight into the executable (and into each carried-over test). The files keep their sub-directory structure — sources and private headers under `src/<origin>/…`, public headers under `include/…` — so nothing is *flattened*. |
+| **Fold in** | A first-party library is **folded into** its consumer: the library target is dropped and its sources compile straight into the executable (and into each carried-over test). The files keep their sub-directory structure, so nothing is *flattened*. |
+| **Origin** | For a first-party source or private header, the target it belongs to. It names the `src/<origin>/` sub-directory the file is copied into. |
+| **Public / private header** | A **public** header is reachable through an include directory (`#include <pkg/x.hpp>`); it is copied to `include/…` at its include-relative path. A **private** header is reached only by a file-relative `#include "sibling.hpp"` from a source beside it; it is copied to `src/<origin>/…` next to that source. |
+| **Place** | Stage 11's term for choosing a file's path in the extracted tree — `place_source()` / `place_header()` — as opposed to the **copy** that then writes it there. |
 | **Link line / link token** | The `target_link_libraries(<exe> PRIVATE …)` the extractor emits for one executable is its **link line**; each entry in it (`fmt::fmt`, `input`) is a **link token**. Stage 3 reads the source project's link tokens from the trace. |
 | **Ground truth** | A fact recorded by the tool that did the work (CMake, the compiler), as opposed to one re-derived by inspecting files afterwards. The whole design prefers the former. |
 | **Extractor / extracted tree** | `tools/extract_closure.py`, and the standalone directory it writes to `extracted/<target>/`. |
@@ -418,9 +421,9 @@ here.
 **Include dirs.** `compileGroups[].includes[].path` is the fully-resolved `-I`
 list for that group — **absolute paths, in search order**, after CMake expanded
 every `target_include_directories`, generator expression and transitive usage
-requirement. The extractor needs it to re-file each copied header at the same
-include-relative path, so `#include "input/input.hpp"` keeps resolving with no
-edit to any source. An entry may also carry `"isSystem": true` (a `-isystem`
+requirement. The extractor needs it to place each copied public header at the
+same include-relative path, so `#include <input/input.hpp>` keeps resolving with
+no edit to any source. An entry may also carry `"isSystem": true` (a `-isystem`
 path); those are the headers a compiler omits from a `-MMD` depfile, which is
 precisely why "is it in the depfile?" cannot be the third-party test (§5).
 
@@ -866,9 +869,9 @@ long version for a large multi-target repo.
       `configurations[0]`. Ninja Multi-Config and Visual Studio have several —
       pick deliberately, or extract per configuration.
 - [ ] **Collisions abort by default (now rare).** Files keep their sub-directory
-      structure under `src/<origin>/`, so same-basename sources no longer clash.
-      Two libraries that both expose `include/<same/path.hpp>` still do — rename
-      one, or `--allow-collisions` to keep the last.
+      structure under `src/<origin>/`, so same-basename sources no longer
+      collide. Two libraries that both expose `include/<same/path.hpp>` still do
+      — rename one, or `--allow-collisions` to keep the last.
 - [ ] **Decide about generated code.** This POC freezes generated headers as
       plain files. If yours embeds a version or a build stamp that must stay
       live, copy the `.in` template and the `configure_file()` call instead.
@@ -965,7 +968,7 @@ with mixed mechanisms.
 
 | At scale you hit | Where it bites | Minimal fix |
 |---|---|---|
-| **Path collisions** — two libraries expose `include/<same/path.hpp>`, or a source is listed from outside its target's dir and its basename clashes | Stage 11 aborts with both paths (same-basename sources within a target no longer clash — structure is kept) | rename one, or `--allow-collisions` to keep the last |
+| **Path collisions** — two libraries expose `include/<same/path.hpp>`, or a source listed from outside its target's dir collides on basename | Stage 11 aborts with both paths (same-basename sources within one target no longer collide — structure is kept) | rename one, or `--allow-collisions` to keep the last |
 | **Multi-config generator** (Ninja Multi-Config, VS) | `load_targets()` reads `configurations[0]` only | extract once per configuration, or hard-code the index you ship |
 | **`OBJECT` libraries** | the extractor works off `dependencies[]` + `sources[]`, not `link.commandFragments`; an OBJECT lib's sources attach to the consuming target | usually fine — the sources are already in the closure; verify with `--verify` |
 | **Generator expressions in include dirs** | the codemodel gives the *resolved* path, so this is fine — but a `$<BUILD_INTERFACE>` path under the build tree lands in `generated/` | check `generated/` after extraction; move genuinely-source headers if misfiled |

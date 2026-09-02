@@ -68,8 +68,8 @@ Output lands in `extracted/<target>/`:
 ```
 extracted/guess/
   CMakeLists.txt      standalone; fmt re-declared via FetchContent
-  src/<origin>/..     first-party sources (app + linked libs), namespaced by
-                      origin, sub-directory structure kept; private headers too
+  src/<origin>/..     first-party sources (app + linked libs) and private
+                      headers, namespaced by origin, sub-directory structure kept
   include/..          first-party public headers at their original include path
   generated/..        generated headers, frozen as plain files
 ```

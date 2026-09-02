@@ -434,10 +434,10 @@ silently.
 
 **Function:** inline in `extract()`
 
-**Purpose:** Learn the `-I` roots each header lives under, so a copied header can
-be placed at the *same include-relative path* and existing `#include "a/b.hpp"`
-lines keep resolving with no source edits. Also capture the language standard for
-the generated `CMakeLists.txt`.
+**Purpose:** Learn the `-I` roots the headers live under, so Stage 11 can place
+each **public** header at the *same include-relative path* and existing
+`#include <a/b.hpp>` lines keep resolving with no source edits. Also capture the
+language standard for the generated `CMakeLists.txt`.
 
 **Input:** the `compileGroups[]` of every *contributing* target — the first-party
 closure plus any carried-over test target.
@@ -462,7 +462,7 @@ cxx_std       = "17"
 
 **Algorithm:** Union all `compileGroups[].includes[].path` across the contributing
 targets, **dropping any root whose `region_owner` is set** — a first-party header
-must never be filed relative to a dependency's include root. Then split what
+must never be placed relative to a dependency's include root. Then split what
 remains: `src_inc_roots` is every root `is_under(root, top_source)`,
 `gen_inc_roots` every root `is_under(root, top_build)`. Read
 `languageStandard.standard` when present (default `"17"`).
@@ -470,7 +470,7 @@ remains: `src_inc_roots` is every root `is_under(root, top_source)`,
 **Note:** the two lists are *not* disjoint. Because `build/` is nested inside the
 source tree, `…/build/generated` satisfies **both** tests and lands in both
 lists. Stage 11 resolves the overlap by matching each header against
-`gen_inc_roots` first, so a generated header is filed under `generated/`, not
+`gen_inc_roots` first, so a generated header is placed under `generated/`, not
 `include/`.
 
 ---
@@ -509,7 +509,7 @@ all_sources = app_sources ∪ every test's sources
 **Algorithm:** Keep each `sources[]` entry that has a non-null
 `compileGroupIndex` (actually compiled, not just a header listed as a source),
 resolve its `path` against `top_source`, and keep it if its extension is
-`.c/.cc/.cpp/.cxx`. Retain the `origin` name so Stage 11 can file each source
+`.c/.cc/.cpp/.cxx`. Retain the `origin` name so Stage 11 can place each source
 relative to that target's directory, under `src/<origin>/`.
 
 `collect_sources()` is called once over the app's `first_party`, then once per
@@ -549,9 +549,9 @@ build/apps/guess/CMakeFiles/guess.dir/src/main.cpp.o.d:
 (GCC really does list `core.h` twice; `parse_depfile()` returns a `set`, so
 duplicates collapse.)
 
-**Output:** `headers_by_origin` — absolute header paths, keyed by the target
-whose translation units pulled them (Stage 11 uses that key to file a private
-header next to the right target's sources).
+**Output:** `headers_by_origin` — absolute header paths, keyed by the origin
+target whose translation units pulled them (Stage 11 uses that key to place a
+private header next to the right target's sources).
 
 ```python
 { "guess": { "…/build/generated/build_info.hpp",
@@ -581,14 +581,14 @@ generated code.
 
 ---
 
-## Stage 11 — Lay out the extracted tree
+## Stage 11 — Place every file, collision-check, then copy
 
 **Function:** inline in `extract()` (uses `longest_root()`)
 
-**Purpose:** Materialise a clean directory that keeps every include path
-resolving — angle-bracket includes via `-I include` / `-I generated`,
-file-relative quote includes because siblings stay siblings — so the copied
-sources compile unmodified.
+**Purpose:** Give every source and header a path in the extracted tree that keeps
+its `#include`s resolving — angle-bracket includes via `-I include` /
+`-I generated`, file-relative quote includes because siblings stay siblings — so
+the copied code compiles unmodified.
 
 **Input:** `all_sources`, `headers_by_origin`, `src_inc_roots`, `gen_inc_roots`,
 `origin_dir` (each target name → its own source directory), the output root.
@@ -616,30 +616,31 @@ rng_test.cmake_sources   = [ "src/rng/src/rng.cpp", "src/rng_test/test/rng_test.
 used_include = True   used_generated = True
 ```
 
-**Algorithm:** the structure is *preserved*, not flattened. Two placement rules,
-each keeping a file's path relative to a meaningful root:
+**Algorithm:** the structure is *preserved*, not flattened. Two placement
+functions decide each file's path, keeping it relative to a meaningful root:
 
 - **`place_source(path, origin)`** — a source keeps its path relative to its
-  target's own directory, under a one-level `src/<origin>/` namespace:
-  `libs/rng/src/rng.cpp` (target `rng`) → `src/rng/src/rng.cpp`. A generated
+  **origin** target's directory, under the one-level `src/<origin>/` namespace:
+  `libs/rng/src/rng.cpp` (origin `rng`) → `src/rng/src/rng.cpp`. A generated
   source (under the build tree) goes to `generated/<relpath>`. A source listed
   from outside its target's directory falls back to `src/<origin>/<basename>`
   with a warning.
-- **`place_header(path, origin)`** — a *public* header (under a `src_inc_roots`
-  entry) keeps its include-relative path under `include/`:
+- **`place_header(path, origin)`** — a **public** header (one under an include
+  root, `src_inc_roots`) keeps its include-relative path under `include/`:
   `libs/input/include/input/input.hpp` → `include/input/input.hpp`. A generated
   header → `generated/<relpath>` (checked first, so an in-source build dir does
-  not misfile it into `include/`). A *private* header — under no include root —
-  is filed next to the target's sources, `src/<origin>/<relpath>`, so a
-  file-relative `#include "internal.hpp"` still resolves; a header pulled by two
-  targets is copied under each.
+  not misplace it into `include/`). A **private** header — under no include
+  root — is placed beside the sources that include it, at
+  `src/<origin>/<relpath>`, so a file-relative `#include "internal.hpp"` still
+  resolves; one pulled by two targets is placed under each.
 
-Then: resolve every file to its destination, **collision-check** (if two
-different files map to one destination, print each clash and `sys.exit` unless
-`--allow-collisions` — now rare, since preserved paths seldom coincide), remove
-any prior `extracted/guess/`, copy, and record each source's output-relative
-path into `cmake_sources` (and each test's own list). `used_include` /
-`used_generated` are set from whether anything landed under those directories.
+Then: **collision-check** — if two different files are placed at one path, print
+each collision and `sys.exit` unless `--allow-collisions` (now rare, since
+preserved paths seldom coincide — the usual case is two libraries exposing the
+same `include/<path>.hpp`). Finally remove any prior `extracted/guess/`, copy
+every file to its placed path, and record each source's path into
+`cmake_sources` (and each test's own list). `used_include` / `used_generated`
+are set from whether anything landed under those directories.
 
 ---
 

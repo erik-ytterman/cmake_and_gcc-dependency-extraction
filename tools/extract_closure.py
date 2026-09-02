@@ -15,8 +15,8 @@ Output (for target T, under --out, default `extracted/`):
   extracted/<T>/
     CMakeLists.txt   standalone; third-party dependencies re-declared, not copied
     src/<origin>/..  first-party sources (the application plus the libraries it
-                     links), namespaced by the target they came from and keeping
-                     their sub-directory structure; private headers sit here too
+                     links) and private headers, each under a `src/<origin>/`
+                     namespace and keeping its sub-directory structure
     include/..       first-party public headers, at their original include path
     generated/..     generated headers, frozen as plain files
 
@@ -70,7 +70,7 @@ SOURCE_EXTS = {".c", ".cc", ".cpp", ".cxx"}
 #    8. (inline)            -- gather include roots + the C++ standard
 #    9. collect_sources     -- list the source files actually compiled
 #   10. parse_depfile       -- read the per-TU *.o.d depfiles for the header closure
-#   11. (inline, longest_root) -- place every file, collision-check, lay out the tree
+#   11. (inline, longest_root) -- place every file, collision-check, then copy
 #   12. write_cmakelists    -- emit the standalone CMakeLists.txt
 #   13. write_readme        -- emit the README.md
 #   14. verify_build        -- (--verify) configure + build + ctest the result
@@ -127,8 +127,8 @@ def extract(target: str, src_root: Path, build_dir: Path, out_root: Path,
     contributing = first_party + [by_id[t["id"]] for t in tests]
 
     # --- Stage 8: the include roots and the C++ standard (from compile groups) ---
-    # Every header will be re-filed relative to one of these roots so that the
-    # existing `#include "a/b.hpp"` lines keep resolving.
+    # A public header is placed relative to the include root it sits under, so
+    # the existing `#include <a/b.hpp>` lines keep resolving via `-I include`.
     inc_roots: set[Path] = set()
     cxx_std = "17"
     for target_json in contributing:
@@ -155,8 +155,8 @@ def extract(target: str, src_root: Path, build_dir: Path, out_root: Path,
 
     # --- Stage 10: the exact header set to copy (from the per-TU depfiles) ---
     # Kept per origin -- the target whose translation units pulled the header --
-    # so that a private header (one under no public include root) can be re-filed
-    # next to that target's sources and stay reachable by a file-relative
+    # so a private header (one under no include root) can be placed next to that
+    # target's sources and stay reachable by a file-relative
     # `#include "sibling.hpp"`.
     headers_by_origin: dict[str, set[Path]] = {}
     for target_json in contributing:
@@ -176,15 +176,14 @@ def extract(target: str, src_root: Path, build_dir: Path, out_root: Path,
                     bucket.add(prereq)  # first-party or generated -- keep it
     header_count = len({h for hs in headers_by_origin.values() for h in hs})
 
-    # --- Stage 11: lay out the extracted tree ---
-    # The original directory structure is *preserved*, not flattened. Each source
-    # and each private header keeps its path relative to its target's own
-    # directory, under a one-level `src/<origin>/` namespace; each public header
-    # keeps its path relative to the include root that exposed it, under
-    # `include/`; generated files go under `generated/`. This keeps every
-    # `#include` resolving -- angle-bracket via `-I include`/`-I generated`,
-    # file-relative quotes because siblings stay siblings -- and makes basename
-    # collisions rare rather than the norm.
+    # --- Stage 11: place every file, collision-check, then copy ---
+    # The original directory structure is preserved, not flattened. A source or
+    # private header keeps its path relative to its origin target's directory,
+    # under the one-level `src/<origin>/` namespace; a public header keeps its
+    # path relative to the include root that exposed it, under `include/`;
+    # generated files go under `generated/`. This keeps every `#include`
+    # resolving -- angle-bracket via `-I include` / `-I generated`, file-relative
+    # quotes because siblings stay siblings -- and makes collisions rare.
     origin_dir = {
         tj["name"]: (top_source / tj["paths"]["source"]).resolve()
         for tj in first_party + [x for t in tests for x in t["first_party"]]}
@@ -192,6 +191,7 @@ def extract(target: str, src_root: Path, build_dir: Path, out_root: Path,
                           key=lambda nd: (len(str(nd[1])), nd[0]), reverse=True)
 
     def place_source(path: Path, origin: str) -> Path:
+        """The source's path in the extracted tree, relative to `out`."""
         if is_under(path, top_build):  # a generated source
             root = longest_root(path, gen_inc_roots)
             return Path("generated") / path.relative_to(root or top_build)
@@ -202,10 +202,13 @@ def extract(target: str, src_root: Path, build_dir: Path, out_root: Path,
             if is_under(path, d):
                 return Path("src") / name / path.relative_to(d)
         print(f"warning: source {path} is outside every target directory; "
-              f"filing at src/{origin}/{path.name}", file=sys.stderr)
+              f"placing it at src/{origin}/{path.name}", file=sys.stderr)
         return Path("src") / origin / path.name
 
     def place_header(path: Path, origin: str) -> Path:
+        """The header's path in the extracted tree, relative to `out`: `include/`
+        for a public header (under an include root), otherwise `src/<origin>/`
+        beside the sources that include it."""
         if is_under(path, top_build):  # generated (also catches in-source builds)
             root = longest_root(path, gen_inc_roots)
             return Path("generated") / path.relative_to(root or top_build)
@@ -219,25 +222,26 @@ def extract(target: str, src_root: Path, build_dir: Path, out_root: Path,
             if is_under(path, d):
                 return Path("src") / name / path.relative_to(d)
         print(f"warning: header {path} has no include root and is outside every "
-              f"target directory; filing at src/{origin}/{path.name}",
+              f"target directory; placing it at src/{origin}/{path.name}",
               file=sys.stderr)
         return Path("src") / origin / path.name
 
-    # Resolve every file to its destination, then collision-check before writing.
+    # Place every file, then check that no two distinct files want the same path.
     src_dest = {(o, s): place_source(s, o) for o, s in all_sources}
     hdr_dest = {(o, h): place_header(h, o)
                 for o, hs in headers_by_origin.items() for h in hs}
 
-    by_dest: dict[Path, set[Path]] = {}
-    for (_, f), d in {**src_dest, **hdr_dest}.items():
-        by_dest.setdefault(d, set()).add(f)
-    clashes = {d: fs for d, fs in sorted(by_dest.items()) if len(fs) > 1}
-    for d, fs in clashes.items():
+    files_at: dict[Path, set[Path]] = {}
+    for (_, source_or_header), d in {**src_dest, **hdr_dest}.items():
+        files_at.setdefault(d, set()).add(source_or_header)
+    collisions = {d: fs for d, fs in sorted(files_at.items()) if len(fs) > 1}
+    for d, fs in collisions.items():
         label = "warning" if allow_collisions else "error"
-        print(f"{label}: {len(fs)} files map onto {d}:", file=sys.stderr)
+        print(f"{label}: {len(fs)} different files collide at {d}:",
+              file=sys.stderr)
         for f in sorted(fs):
             print(f"    {f}", file=sys.stderr)
-    if clashes and not allow_collisions:
+    if collisions and not allow_collisions:
         sys.exit("error: rename the colliding files, or pass --allow-collisions "
                  "to keep only the last one")
 
@@ -246,8 +250,8 @@ def extract(target: str, src_root: Path, build_dir: Path, out_root: Path,
         shutil.rmtree(out)
     out.mkdir(parents=True)
 
-    # Copy each source; remember its new path, keyed by (origin, absolute path),
-    # so the CMakeLists can list it.
+    # Copy each source to its placed path; remember that path, keyed by
+    # (origin, absolute source), so write_cmakelists() can list it.
     rel: dict[tuple[str, Path], str] = {}
     for (origin, source), d in sorted(src_dest.items(), key=lambda kv: str(kv[1])):
         dest = out / d
@@ -259,6 +263,7 @@ def extract(target: str, src_root: Path, build_dir: Path, out_root: Path,
     for t in tests:
         t["cmake_sources"] = [rel[s] for s in t["sources"]]
 
+    # Copy each header to its placed path.
     for (_, header), d in sorted(hdr_dest.items(), key=lambda kv: str(kv[1])):
         dest = out / d
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -752,8 +757,8 @@ def select_tests(registry: dict, by_id: dict, first_party: list, regions: dict,
 # Stage 9: list the source files actually compiled for the given targets.
 def collect_sources(targets: list, top_source: Path) -> list:
     """For every source that is actually compiled, a `(origin, absolute path)`
-    pair, where `origin` is the name of the target it belongs to (used to
-    namespace it on copy).
+    pair, where `origin` is the name of the target it belongs to (Stage 11 uses
+    it as the `src/<origin>/` namespace).
     """
     found = []
     for target_json in targets:
@@ -782,7 +787,7 @@ def parse_depfile(path: Path) -> set[Path]:
 def longest_root(path: Path, roots: list[Path]) -> Path | None:
     """The root in `roots` that contains `path` and is the deepest (its string
     is longest). "Deepest wins" so that a header under a nested include dir is
-    filed relative to that dir, not to some shorter root it also sits under.
+    placed relative to that dir, not to some shorter root it also sits under.
     Returns None if no root contains `path`.
     """
     best = None
