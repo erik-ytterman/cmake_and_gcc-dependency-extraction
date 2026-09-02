@@ -10,6 +10,9 @@ each touching a *different subset*, plus generated code.
 | [TUTORIAL.md](TUTORIAL.md) | Learn the concepts and APIs, hands-on, with the traps |
 | [ALGORITHM.md](ALGORITHM.md) | Reference — every stage, input/output/algorithm |
 
+`python3 util/export_docs.py` renders all three to standalone HTML under
+`/tmp/extract_closure/` for offline reading or printing (needs `markdown-it-py`).
+
 ## Structure
 
 ```
@@ -23,6 +26,8 @@ apps/
   roller/                 dice roller          :         rng + fmt + build_info
   greeter/                greeter              : input +       fmt + build_info
   tally/                  die-roll histogram   :         rng +       build_info
+tools/extract_closure.py  the extractor
+util/export_docs.py       render the Markdown docs to standalone HTML
 ```
 
 ## Dependency subsets
