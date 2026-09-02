@@ -21,6 +21,7 @@ README.md ALGORITHM.md TUTORIAL.md   the docs
 tools/
   extract_closure.py    the extractor
   test_tutorial.sh      runs every TUTORIAL lab against samples/basic
+  run_full_cycle.sh     clean -> build -> test -> extract every app, both samples
 util/
   export_docs.py        render the Markdown docs to standalone HTML
 samples/
@@ -60,9 +61,14 @@ extracted tree looks like when there is nothing to re-declare.
 
 ## Build & test
 
+Build and run the sample the ordinary way. `-MMD` tells the compiler to drop a
+`.d` header-dependency file next to every object file; it is harmless for a
+normal build and is exactly what the extractor reads later, so it is on from the
+start here.
+
 ```sh
 cd samples/basic
-cmake -S . -B build
+cmake -S . -B build -DCMAKE_CXX_FLAGS="-MMD"
 cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
@@ -70,14 +76,43 @@ ctest --test-dir build --output-on-failure
 ## Extracting a minimal standalone closure
 
 `tools/extract_closure.py` extracts the minimal build closure of one application
-target into a standalone, buildable tree:
+target into a standalone, buildable tree.
+
+### What the extractor needs first
+
+**It consumes an already-configured, already-built tree — it never configures or
+builds the source project for you.** Two requirements on that build:
+
+- **A per-translation-unit `.d` depfile next to every object file.** The
+  extractor reads these for the exact header set. Passing `-MMD` in
+  `CMAKE_CXX_FLAGS` guarantees them for any generator or CMake version; without
+  it, whether the `.d` files exist depends on the generator (the Unix Makefiles
+  generator on a recent CMake emits them anyway; Ninja and older setups may not).
+  If a TU has no depfile, its headers are simply not copied — so a standalone
+  build that then fails on a missing `#include` is the symptom of a build done
+  without depfiles.
+- **CMake ≥ 3.21**, because the extractor re-runs configure under
+  `--trace-redirect` to capture the command trace.
+
+What you do and don't re-run before an extraction:
+
+| Command | Run it before extracting? |
+|---|---|
+| `cmake -S . -B build -DCMAKE_CXX_FLAGS="-MMD"` | **Once.** A no-op if the build dir is already configured that way. Re-run it only if you first configured *without* `-MMD` — it flips the flag, and the next build regenerates the `.d` files. |
+| `cmake --build build -j` | **After every source edit**, so the objects and `.d` files are current. |
+| `cmake <build>` reconfigure | **Never by hand.** The extractor runs it itself on every invocation (reconfigure + command trace). |
 
 ```sh
 cd samples/basic
-cmake -S . -B build -DCMAKE_CXX_FLAGS="-MMD"       # build emits .d header deps
-cmake --build build -j
-python3 ../../tools/extract_closure.py guess --verify   # --verify configures+builds it
+cmake -S . -B build -DCMAKE_CXX_FLAGS="-MMD"   # once; no-op if already done
+cmake --build build -j                          # rebuilds only what changed
+python3 ../../tools/extract_closure.py guess --verify   # --verify configures+builds the result
 ```
+
+To run the whole thing end to end from a clean tree — clean, then configure /
+build / test each sample and extract every one of its apps — use
+`bash tools/run_full_cycle.sh` (add `--verify` to also build and test every
+extracted tree).
 
 Output lands in `extracted/<target>/`:
 
