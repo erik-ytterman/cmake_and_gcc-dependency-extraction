@@ -10,14 +10,18 @@ dependencies — nothing else.
 | **README.md** (you are here) | Quickstart — run the thing |
 | [TUTORIAL.md](TUTORIAL.md) | Learn the concepts and APIs, hands-on, with the traps |
 | [ALGORITHM.md](ALGORITHM.md) | Reference — every stage, input/output/algorithm |
+| [GLOSSARY.md](GLOSSARY.md) | Canonical vocabulary, shared by the code and every document |
 
-`python3 util/export_docs.py` renders all three to standalone HTML under
+`python3 util/export_docs.py` renders all four to standalone HTML under
 `/tmp/extract_closure/` for offline reading or printing (needs `markdown-it-py`).
 
 ## Structure
 
 ```
-README.md ALGORITHM.md TUTORIAL.md   the docs
+README.md             quickstart (this file)
+TUTORIAL.md           hands-on guide to the concepts and APIs
+ALGORITHM.md          stage-by-stage reference
+GLOSSARY.md           canonical vocabulary for the code and the docs
 tools/
   extract_closure.py    the extractor
   test_tutorial.sh      runs every TUTORIAL lab against samples/basic
@@ -62,7 +66,8 @@ extracted tree looks like when there is nothing to re-declare.
 ## Build & test
 
 Build and run the sample the ordinary way. `-MMD` tells the compiler to drop a
-`.d` header-dependency file next to every object file; it is harmless for a
+`.d` depfile — the list of headers that object depends on — next to every
+object file; it is harmless for a
 normal build and is exactly what the extractor reads later, so it is on from the
 start here.
 
@@ -88,7 +93,7 @@ builds the source project for you.** Two requirements on that build:
   `CMAKE_CXX_FLAGS` guarantees them for any generator or CMake version; without
   it, whether the `.d` files exist depends on the generator (the Unix Makefiles
   generator on a recent CMake emits them anyway; Ninja and older setups may not).
-  If a TU has no depfile, its headers are simply not copied — so a standalone
+  If a translation unit has no depfile, its headers are simply not copied — so a standalone
   build that then fails on a missing `#include` is the symptom of a build done
   without depfiles.
 - **CMake ≥ 3.21**, because the extractor re-runs configure under

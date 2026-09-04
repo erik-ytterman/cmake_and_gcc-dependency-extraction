@@ -31,6 +31,11 @@ With --with-tests, the CTest tests covering the extracted code are carried over
 too (as extra executables plus add_test()), so the tree can be validated and not
 just compiled. A test is taken only when every library it links is already in the
 closure, so tests never enlarge the tree.
+
+Vocabulary: every term used in this file -- closure, region, origin, include
+root, first-party/third-party, place, covering test -- is defined in
+GLOSSARY.md at the repo root, which is shared with the documentation.
+ALGORITHM.md documents each numbered stage below in full.
 """
 
 from __future__ import annotations

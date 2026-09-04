@@ -3,6 +3,7 @@
 > Reference documentation. If you are meeting this pipeline for the first time,
 > read [TUTORIAL.md](TUTORIAL.md) instead — it teaches the underlying APIs
 > hands-on and covers the traps. Come back here for stage-by-stage detail.
+> Any term used below is defined in [GLOSSARY.md](GLOSSARY.md).
 
 This document walks `tools/extract_closure.py` **in the order it executes**. The
 `extract()` function is the spine of the extractor; every other function is
@@ -36,8 +37,8 @@ The extractor is a *consumer* of an already-configured, already-built tree.
 Before it runs:
 
 - The project is configured into a build dir (default `build/`).
-- The build was compiled with `-MMD` so a per-translation-unit `.d` header
-  dependency file sits next to every object file under
+- The build was compiled with `-MMD` so a per-translation-unit `.d` depfile
+  sits next to every object file under
   `build/**/CMakeFiles/<target>.dir/`.
 - CMake is 3.21 or newer (Stage 1 re-runs configure under `--trace-redirect`).
 
