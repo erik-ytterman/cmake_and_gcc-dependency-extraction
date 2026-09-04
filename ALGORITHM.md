@@ -1,6 +1,7 @@
 # Extraction algorithm
 
-> Reference documentation. If you are meeting this pipeline for the first time,
+> Reference documentation. For the value case and the process end to end, see
+> [SUMMARY.md](SUMMARY.md). If you are meeting this pipeline for the first time,
 > read [TUTORIAL.md](TUTORIAL.md) instead — it teaches the underlying APIs
 > hands-on and covers the traps. Come back here for stage-by-stage detail.
 > Any term used below is defined in [GLOSSARY.md](GLOSSARY.md); the full

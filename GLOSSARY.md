@@ -5,6 +5,7 @@ their terms from here.
 
 | Doc | Role |
 |---|---|
+| [SUMMARY.md](SUMMARY.md) | Executive summary — value, and the process end to end |
 | [README.md](README.md) | Quickstart — run the thing |
 | [TUTORIAL.md](TUTORIAL.md) | Learn the concepts and the APIs, hands-on |
 | [ALGORITHM.md](ALGORITHM.md) | Reference — every stage, input/output/algorithm |

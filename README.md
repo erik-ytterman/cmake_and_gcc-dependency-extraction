@@ -7,18 +7,20 @@ dependencies — nothing else.
 
 | Doc | Role |
 |---|---|
+| [SUMMARY.md](SUMMARY.md) | Executive summary — value, and the process end to end |
 | **README.md** (you are here) | Quickstart — run the thing |
 | [TUTORIAL.md](TUTORIAL.md) | Learn the concepts and APIs, hands-on, with the traps |
 | [ALGORITHM.md](ALGORITHM.md) | Reference — every stage, input/output/algorithm |
 | [GLOSSARY.md](GLOSSARY.md) | Canonical vocabulary, shared by the code and every document |
 | [SAMPLES.md](SAMPLES.md) | Every sample input file and every generated build file, in full |
 
-`python3 util/export_docs.py` renders all five to standalone HTML under
+`python3 util/export_docs.py` renders all six to standalone HTML under
 `/tmp/extract_closure/` for offline reading or printing (needs `markdown-it-py`).
 
 ## Structure
 
 ```
+SUMMARY.md            executive summary — value and the process
 README.md             quickstart (this file)
 TUTORIAL.md           hands-on guide to the concepts and APIs
 ALGORITHM.md          stage-by-stage reference

@@ -12,6 +12,7 @@ query them, and the six traps that make a naive implementation quietly wrong.
 
 | Doc | Role |
 |---|---|
+| [SUMMARY.md](SUMMARY.md) | Executive summary — value, and the process end to end |
 | [README.md](README.md) | Quickstart — run the thing |
 | **TUTORIAL.md** (you are here) | Learn the concepts and the APIs, hands-on |
 | [ALGORITHM.md](ALGORITHM.md) | Reference — every stage, input/output/algorithm |
