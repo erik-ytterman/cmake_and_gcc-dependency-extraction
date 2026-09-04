@@ -80,5 +80,5 @@ the tree. `find_package(Threads)` does not appear either — only `netsvc` used
 it, and `netsvc` is not reached.
 
 The deliverable is **18 files, 176 KB**. Boost's 673 MB never travels: it comes
-back as a four-line `FetchContent_Declare` with its original pinned URL and
+back as a six-line `FetchContent_Declare` with its original pinned URL and
 hash.

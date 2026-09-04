@@ -1057,7 +1057,7 @@ tree states the system dependencies it actually needs, not the ones its origin
 repository happened to declare. `geom_test`, `netsvc_test` and `parsing_test`
 drop out for the same reason, each reported as skipped.
 
-Nor did Boost travel. Its 673 MB stays behind as the four-line
+Nor did Boost travel. Its 673 MB stays behind as the six-line
 `FetchContent_Declare` above, pinned URL and hash intact; the deliverable is
 **18 files, 176 KB**. That is the whole trade: a re-declared dependency is paid
 for by whoever builds the tree, not by whoever ships it.

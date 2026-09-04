@@ -99,7 +99,7 @@ it is the kind of dependency that dominates a codebase's footprint.
 |---|---|
 | Deliverable | **18 files, 176 KB** |
 | Source project it came from | 38 files, 332 KB — plus a **1.2 GB** build tree |
-| Third-party source copied | **0 bytes.** Boost unpacks to **673 MB** and never travels; it returns as a five-line pinned declaration |
+| Third-party source copied | **0 bytes.** Boost unpacks to **673 MB** and never travels; it returns as a six-line pinned declaration |
 | First-party libraries included | **4 of 7** — the three Boost-heavy ones are never reached |
 | Tests carried over | **3 of 6** — the other three cover code outside the closure |
 | Build configuration delivered | **1** generated `CMakeLists.txt`, from 13 CMake files across the source |
