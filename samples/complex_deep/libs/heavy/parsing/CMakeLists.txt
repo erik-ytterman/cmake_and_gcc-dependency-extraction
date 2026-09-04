@@ -1,0 +1,8 @@
+add_library(parsing src/parsing.cpp)
+target_include_directories(parsing PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(parsing PUBLIC Boost::spirit core)
+if(BUILD_TESTING)
+  add_executable(parsing_test test/parsing_test.cpp)
+  target_link_libraries(parsing_test PRIVATE parsing)
+  add_test(NAME parsing_test COMMAND parsing_test)
+endif()

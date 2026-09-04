@@ -7,12 +7,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(CTest)
 
 # --- third-party dependencies -------------------------------------------------
-# fmt is declared in an include()d file; nlohmann_json inside a function. Both
+# Boost is declared in an include()d file; nlohmann_json inside a function. Both
 # are invisible to a text scan of this file -- the point of driving Stage 3 off
 # the command trace.
 include(cmake/deps.cmake)
 declare_json()                          # defines the nlohmann_json declaration
-FetchContent_MakeAvailable(fmt nlohmann_json)
+FetchContent_MakeAvailable(boost nlohmann_json)
 
 # A system dependency, recreated as the same find_package() call, not fetched.
 find_package(Threads REQUIRED)
@@ -28,5 +28,5 @@ target_include_directories(cd_version INTERFACE ${CMAKE_CURRENT_BINARY_DIR}/gene
 # --- first-party libraries (a tree several add_subdirectory levels deep) -----
 add_subdirectory(libs)
 
-# --- applications, each touching a different subset --------------------------
+# --- the single application --------------------------------------------------
 add_subdirectory(apps)

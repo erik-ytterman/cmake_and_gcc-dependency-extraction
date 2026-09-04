@@ -1,0 +1,8 @@
+add_library(netsvc src/netsvc.cpp)
+target_include_directories(netsvc PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(netsvc PUBLIC Boost::asio Threads::Threads core)
+if(BUILD_TESTING)
+  add_executable(netsvc_test test/netsvc_test.cpp)
+  target_link_libraries(netsvc_test PRIVATE netsvc)
+  add_test(NAME netsvc_test COMMAND netsvc_test)
+endif()

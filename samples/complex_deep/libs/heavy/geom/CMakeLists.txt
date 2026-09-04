@@ -1,0 +1,8 @@
+add_library(geom src/geom.cpp)
+target_include_directories(geom PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(geom PUBLIC Boost::geometry core)
+if(BUILD_TESTING)
+  add_executable(geom_test test/geom_test.cpp)
+  target_link_libraries(geom_test PRIVATE geom)
+  add_test(NAME geom_test COMMAND geom_test)
+endif()

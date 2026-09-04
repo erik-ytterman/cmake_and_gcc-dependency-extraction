@@ -1,4 +1,4 @@
-add_subdirectory(base)   # base + base/mathx
-add_subdirectory(text)
-add_subdirectory(net)    # net + net/codec (OBJECT)
-add_subdirectory(data)
+add_subdirectory(core)      # core + core/codec (OBJECT)
+add_subdirectory(jsonio)
+add_subdirectory(textutil)
+add_subdirectory(heavy)     # geom + netsvc + parsing -- none reachable from the app

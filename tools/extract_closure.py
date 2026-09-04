@@ -286,17 +286,24 @@ def extract(target: str, src_root: Path, build_dir: Path, out_root: Path,
     # Stage 6 safety net: a FetchContent dependency in the target graph that no
     # link token happened to name (linked through a generator expression, say)
     # still gets its `<name>::<name>` imported-target name.
+    # Declaration names and imported-target namespaces differ in case by
+    # convention -- FetchContent_Declare(boost ...) yields Boost:: targets -- so
+    # every base-name comparison below is case-insensitive, as Stage 4's region
+    # matching already is.
+    fetch_lc = {name.lower(): name for name in fetch}
+    find_pkgs_lc = {name.lower(): name for name in find_pkgs}
+
     def link_line(owner: str, folded: set[str],
                   fc_from_graph: set[str]) -> list[str]:
         line: list[str] = []
         for src_target in [owner, *sorted(folded)]:
             for token in link_tokens.get(src_target, []):
-                base = token.split("::", 1)[0]
-                if (base in fetch or base in find_pkgs) and token not in line:
+                base = token.split("::", 1)[0].lower()
+                if (base in fetch_lc or base in find_pkgs_lc) and token not in line:
                     line.append(token)
-        seen = {token.split("::", 1)[0] for token in line}
+        seen = {token.split("::", 1)[0].lower() for token in line}
         for name in sorted(fc_from_graph):
-            if name in fetch and name not in seen:
+            if name in fetch and name.lower() not in seen:
                 line.append(fetch[name]["link"])
         return line
 
@@ -312,10 +319,12 @@ def extract(target: str, src_root: Path, build_dir: Path, out_root: Path,
     # find_package calls to re-emit: every package named on a link line.
     graph_fc = (set(externals).union(*(t["externals"] for t in tests))
                 if tests else set(externals))
-    line_bases = {token.split("::", 1)[0]
+    # Map each link token's base back to the declaration name it belongs to,
+    # case-insensitively (Boost::algorithm -> the `boost` declaration).
+    line_bases = {token.split("::", 1)[0].lower()
                   for line in link_lines.values() for token in line}
-    ext_names = sorted((graph_fc | line_bases) & set(fetch))
-    fp_names = sorted(line_bases & set(find_pkgs))
+    ext_names = sorted(graph_fc | {fetch_lc[b] for b in line_bases if b in fetch_lc})
+    fp_names = sorted(find_pkgs_lc[b] for b in line_bases if b in find_pkgs_lc)
     find_package_blocks = [find_pkgs[name] for name in fp_names]
 
     write_cmakelists(out, target, cxx_std, cmake_sources, used_include,
