@@ -854,7 +854,7 @@ what changes — and, mostly, what does not — at that size.
 that shape: a three-level library tree, Boost + `nlohmann_json` +
 `find_package(Threads)`, an `OBJECT` library, and a target with two
 same-basename sources. Its one application, `report`, reaches four of the seven
-first-party targets; the other three exist to be left behind. Run
+first-party libraries; the other three exist to be left behind. Run
 `samples/complex_deep/extract_all.sh` to extract it and check the result.
 
 ### The pipeline is per-target, and most of it already scales

@@ -43,9 +43,11 @@ apps/
 ```
 
 `report` is the only application. It reaches four of the seven first-party
-targets; the three under `heavy/` belong to the rest of the monorepo and each
-pulls in one of Boost's expensive header trees. Extraction leaves all three
-behind, along with their tests.
+libraries — plus `cd_version`, the INTERFACE target carrying the generated
+header, which is why the count above is of libraries rather than of every
+first-party target. The three under `heavy/` belong to the rest of the monorepo
+and each pulls in one of Boost's expensive header trees. Extraction leaves all
+three behind, along with their tests.
 
 ## What each feature is here to exercise
 
