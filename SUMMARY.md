@@ -89,21 +89,54 @@ isolation. The tool can run steps 3 and 4 itself as a self-check.
 
 ## Evidence
 
-Measured against the two sample projects in this repository. They are
-demonstration-scale, so read the ratios as illustrating the mechanism rather than
-predicting numbers for a large codebase.
+Measured against `samples/complex_deep`: one application over a
+seven-library tree, depending on **Boost** and **nlohmann_json**. Boost is the point —
+it is the kind of dependency that dominates a codebase's footprint.
+
+### What you ship
 
 | Property | Result |
 |---|---|
-| Build configuration delivered | **1** generated `CMakeLists.txt`, from 15 across the source project |
-| References back to the source repository | **0** files, in any deliverable |
-| Third-party source copied into deliverables | **0 bytes** — 1,359 files and ~197 MB across two dependencies, replaced by 12 lines of pinned declaration |
-| First-party libraries included | only those reached: 2 of 6 for one application, 6 of 6 for the one that uses everything |
-| Extraction time | **0.68 s** for one application against a warm build |
-| Verification | 9 of 9 applications across both samples extract, build and pass their tests standalone |
+| Deliverable | **18 files, 176 KB** |
+| Source project it came from | 38 files, 332 KB — plus a **1.2 GB** build tree |
+| Third-party source copied | **0 bytes.** Boost unpacks to **673 MB** and never travels; it returns as a five-line pinned declaration |
+| First-party libraries included | **4 of 7** — the three Boost-heavy ones are never reached |
+| Tests carried over | **3 of 6** — the other three cover code outside the closure |
+| Build configuration delivered | **1** generated `CMakeLists.txt`, from 13 CMake files across the source |
+| References back to the source repository | **0** |
+| Extraction time | ~1 s for the closure itself |
 
-The last row is the one that matters operationally: verification is a build and a
-test run, not a code review.
+This is the strong result, and it is what the value case rests on: the thing you
+hand over is three orders of magnitude smaller than the tree it came from, and
+provably contains only what the application compiles.
+
+### What it costs to build
+
+| | Source project | Extracted tree |
+|---|---|---|
+| Configure | 56 s | 49 s |
+| Build, wall clock | 297 s | **219 s** |
+| Build, CPU | 659 s | **642 s** |
+| Translation units | 365 | 370 |
+| Targets | 53 | 43 |
+| Tests | 6, all passing | 3, all passing |
+
+**Read this table honestly: extraction did not make the build meaningfully
+faster.** Wall-clock time fell 26%, but CPU time fell under 3% — and the
+extracted tree compiled *more* translation units than the source project did.
+
+The reason is structural, and it is worth understanding before anyone promises a
+build-time saving. Because third-party dependencies are re-declared rather than
+copied, **the recipient fetches and builds Boost too.** Boost is ~360 of those
+translation units on both sides. Leaving three Boost-heavy first-party libraries
+behind is a real saving, but it is small next to the dependency itself.
+
+The honest formulation: **extraction reduces what you ship, not what a
+dependency costs to build.** Build time improves in proportion to the
+*first-party* code left behind — so the lever is how much of the codebase the
+one application does not use, not how large its dependencies are. A monorepo
+with many applications over shared libraries is where that becomes significant;
+a single application over a huge dependency, as here, is the weakest case for it.
 
 ## What it costs, and what it does not do
 
@@ -121,6 +154,16 @@ findable does not travel with the deliverable and has to be documented for the
 recipient. A vendored git submodule brought in with `add_subdirectory()` is a
 genuine gap: it has no declaration to re-emit, so it needs work before a codebase
 using one can be extracted reliably.
+
+**What does not travel.** The regenerated `FetchContent_Declare` carries the
+dependency's identity and pin, but *not* the CMake variables that condition how
+it is configured. Building this sample surfaced a concrete case: a
+`set(BOOST_INCLUDE_LIBRARIES ...)` next to the declaration narrows Boost to four
+libraries, and it does not survive extraction — the extracted tree configured all
+of Boost and took four times as long to build until the sample was changed to
+stop relying on it. The same class of problem covers toolchain files and cache
+variables. Any such setting has to be documented for the recipient, and a
+production version of this tool would need to capture them.
 
 **Maturity.** This is a proof of concept. The approach is validated end to end
 against two sample projects, including a deliberately awkward one with a deep
