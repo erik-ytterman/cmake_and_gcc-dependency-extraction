@@ -463,11 +463,11 @@ still folded into whatever links it, exactly like a static library:
 
 ```json
 {
-  "name": "codec",
+  "name": "corecodec",
   "type": "OBJECT_LIBRARY",
   "artifacts": [
     {
-      "path": "libs/net/codec/CMakeFiles/codec.dir/src/codec.cpp.o"
+      "path": "libs/core/codec/CMakeFiles/corecodec.dir/src/codec.cpp.o"
     }
   ]
 }
@@ -769,11 +769,10 @@ libs/rng/CMakeFiles/rng.dir/src/rng.cpp.o: \
 And one from `complex_deep`, showing a **private header**:
 
 ```make
-libs/base/mathx/CMakeFiles/mathx.dir/src/util.cpp.o: \
- …/libs/base/mathx/src/util.cpp \
- …/libs/base/mathx/include/mathx/mathx.hpp \
- …/libs/base/mathx/src/internal.hpp \
- …/libs/base/include/base/base.hpp
+libs/core/CMakeFiles/core.dir/src/util.cpp.o: \
+ …/libs/core/src/util.cpp \
+ …/libs/core/include/core/core.hpp \
+ …/libs/core/src/internal.hpp
 ```
 
 `internal.hpp` is reached by a file-relative `#include "internal.hpp"` from a
@@ -845,8 +844,8 @@ expansion and branch:
 | `configure_file` | the generated file itself, via the depfiles |
 
 The samples in this repository are shaped to make the difference biting rather
-than theoretical: `samples/complex_deep` declares fmt in an `include()`d file and
-nlohmann_json inside a function (Part 2). A text scan of the top-level
+than theoretical: `samples/complex_deep` declares Boost in an `include()`d file
+and nlohmann_json inside a function (Part 2). A text scan of the top-level
 `CMakeLists.txt` finds neither. The trace finds both.
 
 **The one exception.** `--deps-file <glob>` text-scans files for
@@ -934,7 +933,7 @@ the archives that used to be shared are gone. `fmt` returns as a regenerated
 declaration rather than a copy. `generated/` holds `build_info.hpp`, the header
 no target file ever mentioned.
 
-**How the nine outputs differ.** Same generator, same rules; all the variation
+**How the five outputs differ.** Same generator, same rules; all the variation
 comes from what each application links:
 
 | Sample | App | Folded in | FetchContent | find_package | Tests |
@@ -943,13 +942,9 @@ comes from what each application links:
 | basic | `roller` | rng | fmt | — | 1 |
 | basic | `greeter` | input | fmt | — | 1 |
 | basic | `tally` | rng | — | — | 1 |
-| complex_deep | `calc` | base, mathx | — | — | 2 |
-| complex_deep | `render` | base, text | fmt | — | 2 |
-| complex_deep | `daemon` | base, codec, net | — | Threads | 2 |
-| complex_deep | `report` | base, data, text | fmt, nlohmann_json | — | 3 |
-| complex_deep | `omni` | base, codec, data, mathx, net, text | fmt, nlohmann_json | Threads | 5 |
+| complex_deep | `report` | core, corecodec, jsonio, textutil | boost, nlohmann_json | — | 3 |
 
-Three rows are worth opening.
+Two rows are worth opening.
 
 **`tally` — nothing to re-declare.** No `FetchContent` section, no
 `target_link_libraries`. Its build directory never grows a `_deps/`, so the tree
@@ -979,86 +974,93 @@ target_include_directories(rng_test PRIVATE include generated)
 add_test(NAME rng_test COMMAND rng_test)
 ```
 
-**`daemon` — a `find_package` dependency.** Re-emitted verbatim for the host
-toolchain to satisfy, rather than fetched. The extracted tree cannot recreate a
-system dependency, so it states the requirement instead of hiding it:
+**`report` — structure preserved, and a large dependency declined.** `core`
+contains `src/util.cpp` *and* `src/detail/util.cpp`. Flattening would have
+silently overwritten one with the other; Stage 11 keeps both, each at its path
+relative to its origin target. `Boost::algorithm` shows the other half of Stage
+6: the link line carries the imported-target name that was actually used, not a
+`boost::boost` guess built from the declaration name:
 
 ```cmake
 cmake_minimum_required(VERSION 3.20)
-project(daemon_standalone LANGUAGES CXX)
+project(report_standalone LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# supplied by the host toolchain, not built by this tree
-find_package(Threads REQUIRED)
-
-add_executable(daemon
-  src/base/src/base.cpp
-  src/codec/src/codec.cpp
-  src/daemon/src/main.cpp
-  src/net/src/net.cpp
+include(FetchContent)
+FetchContent_Declare(
+  boost
+  URL https://github.com/boostorg/boost/releases/download/boost-1.87.0/boost-1.87.0-cmake.tar.gz
+  URL_HASH SHA256=78fbf579e3caf0f47517d3fb4d9301852c3154bfecdc5eeebd9b2b0292366f5b
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
-target_include_directories(daemon PRIVATE include generated)
-target_link_libraries(daemon PRIVATE Threads::Threads)
+FetchContent_Declare(
+  nlohmann_json
+  GIT_REPOSITORY https://github.com/nlohmann/json.git
+  GIT_TAG v3.11.3
+  GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(boost nlohmann_json)
+
+add_executable(report
+  src/core/src/core.cpp
+  src/core/src/detail/util.cpp
+  src/core/src/util.cpp
+  src/corecodec/src/codec.cpp
+  src/jsonio/src/jsonio.cpp
+  src/report/src/main.cpp
+  src/textutil/src/textutil.cpp
+)
+target_include_directories(report PRIVATE include generated)
+target_link_libraries(report PRIVATE nlohmann_json::nlohmann_json Boost::algorithm)
 
 enable_testing()
 
-add_executable(base_test
-  src/base/src/base.cpp
-  src/base_test/test/base_test.cpp
+add_executable(core_test
+  src/core/src/core.cpp
+  src/core/src/detail/util.cpp
+  src/core/src/util.cpp
+  src/core_test/test/core_test.cpp
 )
-target_include_directories(base_test PRIVATE include generated)
-add_test(NAME base_test COMMAND base_test)
+target_include_directories(core_test PRIVATE include generated)
+add_test(NAME core_test COMMAND core_test)
 
-add_executable(net_test
-  src/base/src/base.cpp
-  src/codec/src/codec.cpp
-  src/net/src/net.cpp
-  src/net_test/test/net_test.cpp
+add_executable(jsonio_test
+  src/core/src/core.cpp
+  src/core/src/detail/util.cpp
+  src/core/src/util.cpp
+  src/jsonio/src/jsonio.cpp
+  src/jsonio_test/test/jsonio_test.cpp
 )
-target_include_directories(net_test PRIVATE include generated)
-target_link_libraries(net_test PRIVATE Threads::Threads)
-add_test(NAME net_test COMMAND net_test)
+target_include_directories(jsonio_test PRIVATE include generated)
+target_link_libraries(jsonio_test PRIVATE nlohmann_json::nlohmann_json)
+add_test(NAME jsonio_test COMMAND jsonio_test)
+
+add_executable(textutil_test
+  src/core/src/core.cpp
+  src/core/src/detail/util.cpp
+  src/core/src/util.cpp
+  src/textutil/src/textutil.cpp
+  src/textutil_test/test/textutil_test.cpp
+)
+target_include_directories(textutil_test PRIVATE include generated)
+target_link_libraries(textutil_test PRIVATE Boost::algorithm)
+add_test(NAME textutil_test COMMAND textutil_test)
 ```
 
-**`calc` — structure preserved.** `mathx` contains `src/util.cpp` *and*
-`src/detail/util.cpp`. Flattening would have silently overwritten one with the
-other; Stage 11 keeps both, each at its path relative to its origin target:
+**What is missing is the point.** `samples/complex_deep` calls
+`find_package(Threads REQUIRED)` at its top level, and Stage 3 records it — but
+only `netsvc` ever linked `Threads::Threads`, and `netsvc` is outside `report`'s
+closure. No link line names it, so Stage 8 does not re-emit it: an extracted
+tree states the system dependencies it actually needs, not the ones its origin
+repository happened to declare. `geom_test`, `netsvc_test` and `parsing_test`
+drop out for the same reason, each reported as skipped.
 
-```cmake
-cmake_minimum_required(VERSION 3.20)
-project(calc_standalone LANGUAGES CXX)
-
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-add_executable(calc
-  src/base/src/base.cpp
-  src/calc/src/main.cpp
-  src/mathx/src/detail/util.cpp
-  src/mathx/src/util.cpp
-)
-target_include_directories(calc PRIVATE include generated)
-
-enable_testing()
-
-add_executable(base_test
-  src/base/src/base.cpp
-  src/base_test/test/base_test.cpp
-)
-target_include_directories(base_test PRIVATE include generated)
-add_test(NAME base_test COMMAND base_test)
-
-add_executable(mathx_test
-  src/base/src/base.cpp
-  src/mathx/src/detail/util.cpp
-  src/mathx/src/util.cpp
-  src/mathx_test/test/mathx_test.cpp
-)
-target_include_directories(mathx_test PRIVATE include generated)
-add_test(NAME mathx_test COMMAND mathx_test)
-```
+Nor did Boost travel. Its 673 MB stays behind as the four-line
+`FetchContent_Declare` above, pinned URL and hash intact; the deliverable is
+**18 files, 176 KB**. That is the whole trade: a re-declared dependency is paid
+for by whoever builds the tree, not by whoever ships it.
 
 ---
 

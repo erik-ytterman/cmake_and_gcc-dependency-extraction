@@ -851,10 +851,11 @@ executables, a first-party library tree several `add_subdirectory()` levels
 deep, and a handful of external dependencies fetched by CMake. This section is
 what changes — and, mostly, what does not — at that size.
 [`samples/complex_deep/`](samples/complex_deep/) is a second sample built to
-that shape: a three-level library tree, `fmt` + `nlohmann_json` +
+that shape: a three-level library tree, Boost + `nlohmann_json` +
 `find_package(Threads)`, an `OBJECT` library, and a target with two
-same-basename sources. Run `samples/complex_deep/extract_all.sh` to extract every
-app in it.
+same-basename sources. Its one application, `report`, reaches four of the seven
+first-party targets; the other three exist to be left behind. Run
+`samples/complex_deep/extract_all.sh` to extract it and check the result.
 
 ### The pipeline is per-target, and most of it already scales
 

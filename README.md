@@ -34,8 +34,9 @@ util/
   export_docs.py        render the Markdown docs to standalone HTML
 samples/
   basic/                the teaching sample — 4 apps, 2 libs, one dependency
-  complex_deep/         the larger sample — deep tree, several dependencies,
-                        an OBJECT library, a same-basename collision
+  complex_deep/         the larger sample — deep tree, one app over a partly
+                        used library tree, an OBJECT library, a same-basename
+                        collision, and Boost as the cost of not shipping
 ```
 
 Each `samples/*` is its own CMake project with its own `project()` and build

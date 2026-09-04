@@ -316,8 +316,10 @@ fetch = {                         # one entry per FetchContent dependency
   }
 }
 find_pkgs   = { }   # empty here: samples/basic has no find_package of its own.
-                    # In samples/complex_deep, `daemon` yields
+                    # samples/complex_deep yields
                     #   { "Threads": "find_package(Threads REQUIRED)" }
+                    # — collected whether or not any extracted target reaches it;
+                    # Stage 8 decides what is re-emitted.
 link_tokens = { "guess": ["input", "rng", "fmt::fmt", "build_info"], ... }
 ```
 
