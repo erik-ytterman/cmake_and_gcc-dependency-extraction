@@ -3,7 +3,9 @@
 > Reference documentation. If you are meeting this pipeline for the first time,
 > read [TUTORIAL.md](TUTORIAL.md) instead — it teaches the underlying APIs
 > hands-on and covers the traps. Come back here for stage-by-stage detail.
-> Any term used below is defined in [GLOSSARY.md](GLOSSARY.md).
+> Any term used below is defined in [GLOSSARY.md](GLOSSARY.md); the full
+> content of every sample input file and every generated build file is in
+> [SAMPLES.md](SAMPLES.md).
 
 This document walks `tools/extract_closure.py` **in the order it executes**. The
 `extract()` function is the spine of the extractor; every other function is
@@ -126,6 +128,46 @@ codemodel = {
 }
 ```
 
+**On disk** after the reconfigure — the query stub you wrote, and everything
+CMake wrote back:
+
+```
+build/.cmake/
+├── extract-trace.json                         the command trace
+└── api/v1/
+    ├── query/codemodel-v2                     the request: an empty file, name = the ask
+    └── reply/
+        ├── index-2026-09-04T18-53-21-0999.json   start here
+        ├── codemodel-v2-ec8d6a201fc97d6f8205.json
+        ├── directory-.-f5ebdc15457944623624.json
+        ├── directory-_deps.fmt-build-f7d5aeb4194639b3485c.json
+        ├── directory-libs.rng-3e03c26b03a894b1b77a.json
+        ├── target-guess-….json  target-fmt-….json  target-rng-….json  …
+        └── …
+```
+
+The index is the only stable name — everything else is content-hashed and changes
+on every configure. A real one, trimmed to the parts the extractor reads:
+
+```json
+{
+  "cmake": {
+    "generator": { "multiConfig": false, "name": "Unix Makefiles" },
+    "version":   { "major": 3, "minor": 28, "patch": 3, "string": "3.28.3" }
+  },
+  "objects": [
+    {
+      "jsonFile": "codemodel-v2-ec8d6a201fc97d6f8205.json",
+      "kind": "codemodel",
+      "version": { "major": 2, "minor": 6 }
+    }
+  ]
+}
+```
+
+`load_codemodel()` picks the newest `index-*.json`, finds the object whose
+`kind == "codemodel"`, and follows its `jsonFile`.
+
 **Algorithm:**
 1. Create the query stub `build/.cmake/api/v1/query/codemodel-v2` — an empty file
    whose *name* requests the codemodel object, version 2.
@@ -158,10 +200,50 @@ it).
 
 **Input:** the reply dir and the codemodel object.
 
+**The file being indexed.** Each `targets[]` entry in the codemodel points at one
+`target-<name>-<hash>.json`. This is the most-read file in the pipeline — stages
+4, 5, 6, 8, 9 and 10 each pull a different field out of it — so it is worth
+seeing whole. Here is the real `target-guess-….json`, trimmed only of
+`backtraceGraph` bookkeeping:
+
+```json
+{
+  "name": "guess",
+  "id":   "guess::@bba4818aa150d7f5ff20",
+  "type": "EXECUTABLE",
+  "paths": { "source": "apps/guess", "build": "apps/guess" },
+  "dependencies": [
+    { "id": "fmt::@976f4f0bee90b99ecdb6" },
+    { "id": "rng::@56f3092fcbc80f32493b" },
+    { "id": "input::@6d945ddea8f4ec024c33" }
+  ],
+  "sources": [
+    { "path": "apps/guess/src/main.cpp", "compileGroupIndex": 0 }
+  ],
+  "nameOnDisk": "guess",
+  "artifacts": [ { "path": "apps/guess/guess" } ]
+}
+```
+
+Which field feeds which stage:
+
+| Field | Read by | For |
+|---|---|---|
+| `dependencies[].id` | Stage 5 | the edges of the target graph |
+| `paths.source` | Stage 6 | is this target inside a third-party region? |
+| `compileGroups[].includes` | Stage 8 | the include roots (omitted above, see Stage 8) |
+| `sources[].path` + `compileGroupIndex` | Stage 9 | which files are actually compiled |
+| `name` | Stage 10 | which `<name>.dir/` holds this target's depfiles |
+| `artifacts[].path` | Stage 7 | match a CTest command back to its target |
+
+Note `build_info` is **absent** from `dependencies[]` even though `guess` links
+it: it is an `INTERFACE` library, and `dependencies[]` records build ordering.
+Stage 10 recovers its header anyway, from the depfiles.
+
 **Output:** three dicts.
 
 ```
-by_id      = { "guess::@bba4818aa150d7f5ff20": {<full target JSON>},
+by_id      = { "guess::@bba4818aa150d7f5ff20": {<the JSON above>},
                "fmt::@976f4f0bee90b99ecdb6":   {…}, "rng::@…": {…}, "input::@…": {…}, … }
 name_to_id = { "guess": "guess::@bba4818aa150d7f5ff20",
                "fmt": "fmt::@976f4f0bee90b99ecdb6", "rng": "rng::@…", … }
@@ -181,8 +263,9 @@ a closure.
 
 ## Stage 3 — Recover the third-party dependencies from the command trace
 
-**Function:** `load_trace()`, then `gather_fetchcontent()`,
-`traced_find_packages()`, `traced_link_tokens()`
+**Function:** `load_trace()`, then `traced_declare_names()`,
+`gather_fetchcontent()`, `traced_find_packages()`, `traced_link_tokens()`
+(plus `text_declares()` for `--deps-file`)
 
 **Purpose:** Learn every third-party dependency the project actually pulls in, and
 how each target links it, so the emitted `CMakeLists.txt` can reproduce the
@@ -192,11 +275,28 @@ copying the dependency's code.
 **Input:** the command trace from Stage 1. Each trace record is one command CMake
 ran, as `{"cmd", "args", "file", "line"}`:
 
+Three real records from this run, reformatted for width (each is one line in the
+file, and carries `frame` / `global_frame` / `time` fields the extractor ignores):
+
 ```json
-{"cmd":"FetchContent_Declare","args":["fmt","GIT_REPOSITORY","https://github.com/fmtlib/fmt.git","GIT_TAG","10.2.1","GIT_SHALLOW","TRUE"],"file":".../CMakeLists.txt","line":12}
-{"cmd":"target_link_libraries","args":["guess","PRIVATE","input","rng","fmt::fmt","build_info"],"file":".../apps/guess/CMakeLists.txt","line":2}
-{"cmd":"find_package","args":["Threads","REQUIRED"],"file":".../CMakeLists.txt","line":4}
+{"cmd":"FetchContent_Declare",
+ "args":["fmt","GIT_REPOSITORY","https://github.com/fmtlib/fmt.git",
+         "GIT_TAG","10.2.1","GIT_SHALLOW","TRUE"],
+ "file":"…/CMakeLists.txt","line":12,"line_end":17,"frame":1}
+
+{"cmd":"target_link_libraries",
+ "args":["guess","PRIVATE","input","rng","fmt::fmt","build_info"],
+ "file":"…/apps/guess/CMakeLists.txt","line":2,"frame":1}
+
+{"cmd":"find_package","args":["Git","QUIET"],
+ "file":"/usr/share/cmake-3.28/Modules/FetchContent.cmake","line":1635,"frame":5}
 ```
+
+The third is the one to notice: it is a genuine `find_package` record, but its
+`file` is inside CMake's own bundled modules — `FetchContent.cmake` looks for Git
+so it can clone. Re-emitting it would make the extracted tree demand Git for no
+reason. The `file`-based filter below is what discards it, and this record is
+exactly why that filter exists.
 
 `args` arrives already variable-expanded, with every `if()` / `foreach()` /
 `function()` resolved, so `FetchContent_Declare(${dep} ...)`, a declaration inside
@@ -214,7 +314,9 @@ fetch = {                         # one entry per FetchContent dependency
     "link":  "fmt::fmt",                                  # imported-target name (fallback)
   }
 }
-find_pkgs   = { "Threads": "find_package(Threads REQUIRED)" }   # re-emitted verbatim
+find_pkgs   = { }   # empty here: samples/basic has no find_package of its own.
+                    # In samples/complex_deep, `daemon` yields
+                    #   { "Threads": "find_package(Threads REQUIRED)" }
 link_tokens = { "guess": ["input", "rng", "fmt::fmt", "build_info"], ... }
 ```
 
@@ -239,15 +341,26 @@ link_tokens = { "guess": ["input", "rng", "fmt::fmt", "build_info"], ... }
   accumulated across every call. Calls on a name that is not a known project
   target are ignored, which drops `try_compile()`'s scratch targets.
 
-**`--deps-file`:** a rarely-needed escape hatch. The globbed files are
-text-scanned by `parse_fetchcontent()` (regex `FetchContent_Declare\s*\(\s*(\w+)
-(.*?)\n\)`, dotall) and merged into `fetch`. Use it only for a declaration
-guarded behind an `if()` the trace never enters.
+**`--deps-file`:** a rarely-needed escape hatch, implemented by
+`text_declares()`. It expands each glob against the source root and text-scans
+the matched files with `parse_fetchcontent()` (regex
+`FetchContent_Declare\s*\(\s*(\w+)(.*?)\n\)`, dotall), merging what it finds into
+`fetch`. This is the one place the extractor reads CMake *as text*, with all the
+fragility that implies — use it only for a declaration guarded behind an `if()`
+the trace never enters.
 
-**Note:** the FetchContent *names* are collected first (without the region
-filter) because Stage 4 needs them before regions exist; the blocks, the
-`find_package` calls and the link tokens are then filtered against the regions
-Stage 4 produces.
+**Note — why this stage runs in two halves.** Stage 4 needs the set of declared
+dependency names before it can map regions, but the region filter above needs
+Stage 4's output. The cycle is broken by splitting the work:
+`traced_declare_names()` runs first and collects just the *names* from every
+`FetchContent_Declare` record; Stage 4 uses those to map the regions; then
+`gather_fetchcontent()`, `traced_find_packages()` and `traced_link_tokens()` run
+with the regions available.
+
+The first pass still applies the `file`-under-source-root half of the filter — it
+skips only the region half, which does not exist yet. Over-collecting a name
+there is harmless in any case, because Stage 4 only ever matches a name against a
+real directory or a real target, and a name matching neither has no effect.
 
 ---
 
@@ -792,10 +905,50 @@ when tests came along, that it still behaves.
 **Output:** a configured + built `extracted/guess/build/` with `ctest` green, or a
 non-zero exit on the first failure.
 
+Real output from this run, from the fresh configure of the extracted tree
+through to the tests — note that `fmt` is fetched and built here from the
+regenerated `FetchContent_Declare`, which is what proves the re-declaration
+works:
+
 ```
+-- Configuring done (2.8s)
+-- Generating done (0.0s)
+-- Build files have been written to: …/extracted/guess/build
+[ 15%] Building CXX object _deps/fmt-build/CMakeFiles/fmt.dir/src/format.cc.o
+[ 15%] Building CXX object _deps/fmt-build/CMakeFiles/fmt.dir/src/os.cc.o
+[ 23%] Building CXX object CMakeFiles/rng_test.dir/src/rng/src/rng.cpp.o
+[ 30%] Building CXX object CMakeFiles/rng_test.dir/src/rng_test/test/rng_test.cpp.o
+[ 38%] Linking CXX executable rng_test
+[ 38%] Built target rng_test
+[ 46%] Linking CXX static library libfmt.a
+[ 46%] Built target fmt
+[ 53%] Building CXX object CMakeFiles/guess.dir/src/guess/src/main.cpp.o
+[ 61%] Building CXX object CMakeFiles/input_test.dir/src/input_test/test/input_test.cpp.o
+[ 69%] Building CXX object CMakeFiles/guess.dir/src/input/src/input.cpp.o
+[ 76%] Building CXX object CMakeFiles/input_test.dir/src/input/src/input.cpp.o
+[ 84%] Building CXX object CMakeFiles/guess.dir/src/rng/src/rng.cpp.o
+[ 92%] Linking CXX executable input_test
+[100%] Linking CXX executable guess
+[100%] Built target input_test
+[100%] Built target guess
+Test project …/extracted/guess/build
+    Start 1: input_test
+1/2 Test #1: input_test .......................   Passed    0.00 sec
+    Start 2: rng_test
+2/2 Test #2: rng_test .........................   Passed    0.00 sec
+
+100% tests passed, 0 tests failed out of 2
+
 --- verifying build of extracted 'guess' ---
 --- OK: …/extracted/guess/build built and tested successfully ---
 ```
+
+Two details worth reading off that log. `rng_test` compiles
+`src/rng/src/rng.cpp` and `guess` compiles it again — the library was folded
+into both, so a folded-in library's sources appear in every target that used
+to link it. `input.cpp` is built twice for the same reason. And `fmt` is
+fetched and built right here, from the regenerated `FetchContent_Declare` —
+which is what actually proves the re-declaration works.
 
 **Algorithm:** Run `cmake -S <out> -B <out>/build`, then
 `cmake --build <out>/build -j`, then — when Stage 7 carried tests over —

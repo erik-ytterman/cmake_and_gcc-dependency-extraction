@@ -31,7 +31,8 @@ from pathlib import Path
 
 from markdown_it import MarkdownIt
 
-DOCS = ["README.md", "ALGORITHM.md", "TUTORIAL.md", "GLOSSARY.md"]
+DOCS = ["README.md", "ALGORITHM.md", "TUTORIAL.md", "GLOSSARY.md",
+        "SAMPLES.md"]
 
 CSS = """
 :root { color-scheme: light; }

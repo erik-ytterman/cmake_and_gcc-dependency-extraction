@@ -11,8 +11,9 @@ dependencies — nothing else.
 | [TUTORIAL.md](TUTORIAL.md) | Learn the concepts and APIs, hands-on, with the traps |
 | [ALGORITHM.md](ALGORITHM.md) | Reference — every stage, input/output/algorithm |
 | [GLOSSARY.md](GLOSSARY.md) | Canonical vocabulary, shared by the code and every document |
+| [SAMPLES.md](SAMPLES.md) | Every sample input file and every generated build file, in full |
 
-`python3 util/export_docs.py` renders all four to standalone HTML under
+`python3 util/export_docs.py` renders all five to standalone HTML under
 `/tmp/extract_closure/` for offline reading or printing (needs `markdown-it-py`).
 
 ## Structure
@@ -22,6 +23,7 @@ README.md             quickstart (this file)
 TUTORIAL.md           hands-on guide to the concepts and APIs
 ALGORITHM.md          stage-by-stage reference
 GLOSSARY.md           canonical vocabulary for the code and the docs
+SAMPLES.md            every sample input + every generated build file
 tools/
   extract_closure.py    the extractor
   test_tutorial.sh      runs every TUTORIAL lab against samples/basic

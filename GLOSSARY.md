@@ -1,7 +1,15 @@
 # Glossary
 
-The canonical vocabulary for this repository — the code and all three documents
-draw their terms from here.
+The canonical vocabulary for this repository — the code and every document draw
+their terms from here.
+
+| Doc | Role |
+|---|---|
+| [README.md](README.md) | Quickstart — run the thing |
+| [TUTORIAL.md](TUTORIAL.md) | Learn the concepts and the APIs, hands-on |
+| [ALGORITHM.md](ALGORITHM.md) | Reference — every stage, input/output/algorithm |
+| **GLOSSARY.md** (you are here) | Canonical vocabulary, shared by the code and every document |
+| [SAMPLES.md](SAMPLES.md) | The file formats extraction reads and writes, with real samples |
 
 **The rule: one concept, one term, one spelling.** If a word appears in a
 docstring, a comment, an identifier, or a document, it means what this file says

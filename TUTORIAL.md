@@ -16,6 +16,7 @@ query them, and the six traps that make a naive implementation quietly wrong.
 | **TUTORIAL.md** (you are here) | Learn the concepts and the APIs, hands-on |
 | [ALGORITHM.md](ALGORITHM.md) | Reference — every stage, input/output/algorithm |
 | [GLOSSARY.md](GLOSSARY.md) | Canonical vocabulary, shared by the code and every document |
+| [SAMPLES.md](SAMPLES.md) | Every sample input file and every generated build file, in full |
 
 Work through this with a terminal open. Every command below is real, and every
 output shown is actual output from this project. If you would rather watch the
